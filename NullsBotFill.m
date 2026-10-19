@@ -278,8 +278,14 @@ static BOOL NBFInstallMethod(Class target, SEL gameSel, Class hookClass, SEL hoo
 
     // If addMethod failed and the selector resolves to a superclass method,
     // installing would rewrite the superclass for every subclass. Bail.
-    if (method_getImplementation(installed) != method_getImplementation(hook)) {
+    Class super = class_getSuperclass(target);
+    if (super && class_getInstanceMethod(super, hookSel) == installed) {
         NBFLog(@"skip -[%s %s]: hook selector resolves outside the class",
+               class_getName(target), sel_getName(gameSel));
+        return NO;
+    }
+    if (method_getImplementation(installed) != method_getImplementation(hook)) {
+        NBFLog(@"skip -[%s %s]: hook implementation did not land",
                class_getName(target), sel_getName(gameSel));
         return NO;
     }
@@ -304,6 +310,20 @@ static BOOL NBFNameLooksLikeGameClass(const char *name) {
     static const char *tokens[] = {
         "Battle", "Player", "Match", "Lobby", "Room", "Rank", "Pick",
         "Ban", "Bot", "Game", "Arena", "Logic", "Entity", "Character"
+    };
+    if (!name) return NO;
+    for (size_t i = 0; i < sizeof(tokens) / sizeof(tokens[0]); i++) {
+        if (strstr(name, tokens[i])) return YES;
+    }
+    return NO;
+}
+
+// Strict variant for install scans: only battle-side classes, so a UIKit class
+// whose name happens to contain "Player" is never touched.
+static BOOL NBFNameLooksLikeBattleClass(const char *name) {
+    static const char *tokens[] = {
+        "Battle", "Brawl", "Arena", "Lobby", "Matchmaking", "Ranked",
+        "Logic", "Combat", "GameServer"
     };
     if (!name) return NO;
     for (size_t i = 0; i < sizeof(tokens) / sizeof(tokens[0]); i++) {
@@ -857,7 +877,7 @@ static void NBFScanClasses(NSArray *selectorNames,
     for (unsigned int i = 0; i < count; i++) {
         Class cls = classes[i];
         const char *name = class_getName(cls);
-        if (!NBFNameLooksLikeGameClass(name)) continue;
+        if (!NBFNameLooksLikeBattleClass(name)) continue;
         if (strncmp(name, "NBF", 3) == 0) continue;
 
         for (NSString *selName in selectorNames) {
