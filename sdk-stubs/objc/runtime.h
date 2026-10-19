@@ -29,6 +29,9 @@ BOOL        class_respondsToSelector(Class cls, SEL sel);
 Method class_getInstanceMethod(Class cls, SEL name);
 Method class_getClassMethod(Class cls, SEL name);
 Method *class_copyMethodList(Class cls, unsigned int *outCount);
+objc_property_t *class_copyPropertyList(Class cls, unsigned int *outCount);
+const char *property_getName(objc_property_t property);
+Class object_getClass(id object);
 BOOL   class_addMethod(Class cls, SEL name, IMP imp, const char *types);
 
 SEL         method_getName(Method m);

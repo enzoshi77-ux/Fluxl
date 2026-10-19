@@ -53,6 +53,11 @@
 	<key>DumpCandidates</key>
 	<true/>
 
+	<!-- Discovery only: dump classes and return without installing a single
+	     hook. First thing to try when the app crashes. -->
+	<key>DryRun</key>
+	<false/>
+
 	<!-- Walk the runtime class list when the configured names are absent. -->
 	<key>ScanUnlistedClasses</key>
 	<true/>

@@ -127,6 +127,7 @@ static const char kBotStateKey  = 3;
 @property (nonatomic, assign) BOOL tickSuppressOriginal;
 @property (nonatomic, assign) BOOL dumpCandidates;
 @property (nonatomic, assign) BOOL scanUnlistedClasses;
+@property (nonatomic, assign) BOOL dryRun;
 
 + (instancetype)shared;
 - (int)brawlerIdForSlot:(int)slot ranked:(BOOL)ranked;
@@ -175,6 +176,7 @@ static const char kBotStateKey  = 3;
     self.tickSuppressOriginal = YES;
     self.dumpCandidates = YES;
     self.scanUnlistedClasses = YES;
+    self.dryRun = NO;
 
     return self;
 }
@@ -220,6 +222,8 @@ static const char kBotStateKey  = 3;
             self.dumpCandidates = [value boolValue];
         if ((value = [dict objectForKey:@"ScanUnlistedClasses"]))
             self.scanUnlistedClasses = [value boolValue];
+        if ((value = [dict objectForKey:@"DryRun"]))
+            self.dryRun = [value boolValue];
 
         NBFLog(@"config loaded from %@", path);
         return;
@@ -462,17 +466,21 @@ static NSArray *NBFResolveAttackKeys(id entity) {
 static Class gPlayerClass = Nil;
 static BOOL  gPlayerClassResolved = NO;
 
-// A class is usable only if an instance accepts the synthetic playerId write.
-static BOOL NBFProbePlayerClass(Class cls) {
-    if (!cls) return NO;
-    @try {
-        id probe = [[cls alloc] init];
-        if (!probe) return NO;
-        [probe setValue:@1 forKey:@"playerId"];
-        return YES;
-    } @catch (...) {
-        return NO;
+// Crash-free existence test: never instantiates the candidate. An inherited
+// KVC key or a playerId setter is enough to accept the class; alloc/init is
+// deferred to the moment a bot is actually built inside a live match.
+static BOOL NBFClassExposesPlayerId(Class cls) {
+    unsigned int count = 0;
+    objc_property_t *properties = class_copyPropertyList(cls, &count);
+    BOOL found = NO;
+    for (unsigned int i = 0; i < count; i++) {
+        const char *name = property_getName(properties[i]);
+        if (name && strcmp(name, "playerId") == 0) { found = YES; break; }
     }
+    if (properties) free(properties);
+    if (found) return YES;
+
+    return class_getInstanceMethod(cls, sel_registerName("setPlayerId:")) != NULL;
 }
 
 static Class NBFResolvePlayerClass(void) {
@@ -483,7 +491,7 @@ static Class NBFResolvePlayerClass(void) {
 
     for (NSString *name in cfg.playerClasses) {
         Class cls = NSClassFromString(name);
-        if (cls && NBFProbePlayerClass(cls)) {
+        if (cls && NBFClassExposesPlayerId(cls)) {
             gPlayerClass = cls;
             NBFLog(@"player class: %@", name);
             return cls;
@@ -498,7 +506,7 @@ static Class NBFResolvePlayerClass(void) {
                 const char *name = class_getName(classes[i]);
                 if (!NBFNameLooksLikeGameClass(name)) continue;
                 if (!strstr(name, "Player")) continue;
-                if (NBFProbePlayerClass(classes[i])) {
+                if (NBFClassExposesPlayerId(classes[i])) {
                     gPlayerClass = classes[i];
                     NBFLog(@"player class (scanned): %s", name);
                 }
@@ -703,6 +711,51 @@ static void NBFStepBot(id entity, double delta) {
 - (void)nbf_banForPlayer:(id)player;
 @end
 
+// How this build's assignBrawler:toPlayer: takes its first argument.
+// 0 unknown (call nothing), 1 (id,id), 2 (int,id), 3 (long long,id).
+// Calling it blind with an NSNumber where the ABI expects an int hands the
+// method a pointer — that is a segfault, not an exception.
+static int NBFParseBrawlerAssignEncoding(const char *types) {
+    if (!types || types[0] != 'v') return 0;
+    const char *p = types + 1;
+    while (*p >= '0' && *p <= '9') p++;
+    if (*p++ != '@') return 0;
+    while (*p >= '0' && *p <= '9') p++;
+    if (*p++ != ':') return 0;
+    while (*p >= '0' && *p <= '9') p++;
+
+    char first = *p;
+    if (first == '@') return 1;
+    if (first == 'i' || first == 'I') return 2;
+    if (first == 'q' || first == 'Q') return 3;
+    return 0;
+}
+
+static BOOL NBFCallBrawlerAssign(id target, SEL sel, NSNumber *brawlerId, id player) {
+    Method method = class_getInstanceMethod(object_getClass(target), sel);
+    if (!method) return NO;
+
+    switch (NBFParseBrawlerAssignEncoding(method_getTypeEncoding(method))) {
+        case 1: {
+            typedef void (*Send)(id, SEL, id, id);
+            ((Send)objc_msgSend)(target, sel, brawlerId, player);
+            return YES;
+        }
+        case 2: {
+            typedef void (*Send)(id, SEL, int, id);
+            ((Send)objc_msgSend)(target, sel, [brawlerId intValue], player);
+            return YES;
+        }
+        case 3: {
+            typedef void (*Send)(id, SEL, long long, id);
+            ((Send)objc_msgSend)(target, sel, [brawlerId longLongValue], player);
+            return YES;
+        }
+        default:
+            return NO;
+    }
+}
+
 @implementation NBFRankedHook
 
 - (void)nbf_pickForPlayer:(id)player {
@@ -722,9 +775,10 @@ static void NBFStepBot(id entity, double delta) {
 
     SEL assign = NSSelectorFromString(@"assignBrawler:toPlayer:");
     if ([self respondsToSelector:assign]) {
-        typedef void (*NBFTwoObjectSend)(id, SEL, id, id);
         @try {
-            ((NBFTwoObjectSend)objc_msgSend)(self, assign, brawlerId, player);
+            if (!NBFCallBrawlerAssign(self, assign, brawlerId, player)) {
+                NBFLog(@"assignBrawler:toPlayer: encoding unsupported, KVC only");
+            }
         } @catch (...) {
             NBFLog(@"assignBrawler:toPlayer: threw for slot %d", slot);
         }
@@ -990,16 +1044,25 @@ static void NBFInit(void) {
         NBFConfig *cfg = [NBFConfig shared];
         NBFLog(@"NullsBotFill loaded, scanning for game classes");
 
-        if (cfg.dumpCandidates) {
-            NBFDumpCandidates();
-        }
+        @try {
+            if (cfg.dumpCandidates) {
+                NBFDumpCandidates();
+            }
 
-        NBFInstallAll();
+            if (cfg.dryRun) {
+                NBFLog(@"DryRun set — discovery only, no hooks installed");
+                return;
+            }
 
-        if (gHookCount == 0) {
-            NBFLog(@"no hooks installed — this build exposes no matching ObjC "
-                   @"surface; read the candidate dump and set the class names "
-                   @"in NullsBotFill.plist");
+            NBFInstallAll();
+
+            if (gHookCount == 0) {
+                NBFLog(@"no hooks installed — this build exposes no matching ObjC "
+                       @"surface; read the candidate dump and set the class names "
+                       @"in NullsBotFill.plist");
+            }
+        } @catch (id exception) {
+            NBFLog(@"install aborted by exception: %@", exception);
         }
     });
 }

@@ -80,10 +80,52 @@ The C++ route, in order:
 That path needs the decrypted binary in hand. Nothing in this repo can invent
 it.
 
-## Config keys
+## Crash logs
+
+The app's own crash report:
+
+| Setup | Where |
+|---|---|
+| iOS, no jailbreak | Settings → Privacy & Security → Analytics & Improvements → Analytics Data → search the app name. Requires "Share iPhone Analytics" to be on. |
+| Xcode | Window → Devices and Simulators → pick device → View Device Logs |
+| macOS, synced | `~/Library/Logs/CrashReporter/MobileDevice/<device name>/` |
+| Windows, synced | `%APPDATA%\Apple Computer\Logs\CrashReporter\MobileDevice\<device name>\` |
+| Linux | `idevicecrashreport -u <udid> -e ./crashes` (libimobiledevice) |
+| Jailbroken | `/var/mobile/Library/Logs/CrashReporter/` |
+
+In the `.ips`, the three fields that matter: `Exception Type`, `Termination
+Reason`, and `Last Exception Backtrace`. Then check `Binary Images` for
+`NullsBotFill.dylib` — if it is listed, the dylib loaded and the crash came
+after load.
+
+The tweak's own log:
+
+```
+<LiveContainer data container>/Documents/Applications/<bundle id>/tmp/NullsBotFill.log
+<...>/tmp/NullsBotFill-candidates.txt
+```
+
+In LiveContainer's Files view: LiveContainer → the app → its data folder → tmp.
+Also on the console as `[NBF]` lines: `idevicesyslog -u <udid> | grep NBF`, or
+Console.app with the device selected.
+
+If `NullsBotFill.log` does not exist at all, the crash happened before the
+tweak's 0.75 s entry timer — that rules out every hook and points at load:
+wrong architecture, signature, or a missing dependency.
+
+## If it crashes
+
+1. Set `DryRun` to `true` in the plist, relaunch.
+2. Still crashes → load path, not our hooks. Check `file dist/NullsBotFill.dylib`
+   reports arm64 and that LiveContainer is not refusing the signature.
+3. No longer crashes → a hook is the cause. The log names every hook that
+   installed, in order; the last one before the crash is the suspect. Remove
+   that class from the matching list in the plist and relaunch — no rebuild.
+4. Send the log plus the `.ips` back with the last `[NBF]` line intact.
+
 
 `BotBrawlerIds`, `RankedBrawlerIds`, `BotNames`, `BotBaseId`, `WalkInterval`,
-`RankedEnabled`, `TickSuppressOriginal`, `DumpCandidates`,
+`RankedEnabled`, `TickSuppressOriginal`, `DumpCandidates`, `DryRun`,
 `ScanUnlistedClasses`, `ExcludedModes`, `PlayerClasses`, `SetupClasses`,
 `SetupSelectors`, `TickClasses`, `TickSelectors`, `PickClasses`,
 `PickSelectors`, `BanSelectors`, `JoinClasses`, `JoinSelectors`.
