@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Drop this next to the dylib in the app's Documents folder as
+	     NullsBotFill.plist, or into <container>/Documents/Tweaks/. It is
+	     optional: without it the defaults compiled into the dylib are used. -->
+
+	<key>BotBrawlerIds</key>
+	<array>
+		<integer>16000000</integer>
+		<integer>16000001</integer>
+		<integer>16000002</integer>
+		<integer>16000003</integer>
+		<integer>16000004</integer>
+	</array>
+
+	<key>RankedBrawlerIds</key>
+	<array>
+		<integer>16000005</integer>
+		<integer>16000006</integer>
+		<integer>16000007</integer>
+		<integer>16000008</integer>
+		<integer>16000009</integer>
+	</array>
+
+	<key>BotNames</key>
+	<array>
+		<string>BOT_01</string>
+		<string>BOT_02</string>
+		<string>BOT_03</string>
+		<string>BOT_04</string>
+		<string>BOT_05</string>
+	</array>
+
+	<key>BotBaseId</key>
+	<integer>900100</integer>
+
+	<key>WalkInterval</key>
+	<real>1.5</real>
+
+	<key>RankedEnabled</key>
+	<true/>
+
+	<!-- true: the game's own tick is not called for bots, only our heading is set.
+	     false: the game tick runs, with attack intents cleared first. If bots
+	     freeze in place, set this to false. -->
+	<key>TickSuppressOriginal</key>
+	<true/>
+
+	<!-- Writes <tmp>/NullsBotFill-candidates.txt at load: every game-shaped
+	     class and its relevant selectors. Turn off once the names are known. -->
+	<key>DumpCandidates</key>
+	<true/>
+
+	<!-- Walk the runtime class list when the configured names are absent. -->
+	<key>ScanUnlistedClasses</key>
+	<true/>
+
+	<key>ExcludedModes</key>
+	<array>
+		<string>soloShowdown</string>
+		<string>bounty</string>
+	</array>
+
+	<key>PlayerClasses</key>
+	<array>
+		<string>PlayerEntry</string>
+		<string>BattlePlayer</string>
+		<string>ClientPlayer</string>
+	</array>
+
+	<key>SetupClasses</key>
+	<array>
+		<string>BattleManager</string>
+		<string>ClientBattle</string>
+		<string>BattleSetupManager</string>
+	</array>
+
+	<key>SetupSelectors</key>
+	<array>
+		<string>applyMatchConfig:</string>
+		<string>setupBattle:</string>
+		<string>startBattle:</string>
+		<string>initBattle:</string>
+	</array>
+
+	<key>TickClasses</key>
+	<array>
+		<string>BattleEntity</string>
+		<string>CharacterLogic</string>
+		<string>BrawlerEntity</string>
+		<string>ClientCharacter</string>
+	</array>
+
+	<key>TickSelectors</key>
+	<array>
+		<string>updateTick:</string>
+		<string>update:</string>
+		<string>tick:</string>
+	</array>
+
+	<key>PickClasses</key>
+	<array>
+		<string>RankedPickManager</string>
+		<string>DraftManager</string>
+		<string>PickPhaseManager</string>
+	</array>
+
+	<key>PickSelectors</key>
+	<array>
+		<string>requestBrawlerPickForPlayer:</string>
+		<string>handlePickTurn:</string>
+	</array>
+
+	<key>BanSelectors</key>
+	<array>
+		<string>requestBanForPlayer:</string>
+		<string>handleBanTurn:</string>
+	</array>
+
+	<key>JoinClasses</key>
+	<array>
+		<string>MatchmakingManager</string>
+		<string>LobbyManager</string>
+		<string>JoinPacketBuilder</string>
+	</array>
+
+	<key>JoinSelectors</key>
+	<array>
+		<string>buildJoinPacket:</string>
+	</array>
+</dict>
+</plist>
