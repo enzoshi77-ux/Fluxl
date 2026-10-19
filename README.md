@@ -58,27 +58,71 @@ every game-shaped class with its selectors to
 skip with the reason. Feed the real names back through the plist and no rebuild
 is needed.
 
-## The part that matters on this target
+## IPA route
 
-Null's Brawl is a Supercell-derived client. Battle logic there is C++, not
-Objective-C — `LogicBattle`, `LogicPlayer`, `LogicCharacter` and friends.
-UIKit/ObjC is the shell: launch, IAP, lifecycle, some matchmaking glue. An ObjC
-swizzle can only ever intercept the shell. If the candidate dump comes back
-thin, that is the reason, not a bug in the hook code.
+`tools/patch_ipa.py` bakes the dylib into the app instead of loading it as a
+tweak:
 
-The C++ route, in order:
+```sh
+python3 tools/patch_ipa.py nb.ipa dist/NullsBotFill.dylib out.ipa
+```
 
-1. Decrypt the app binary, `nm -C` it, grep `LogicBattle`, `LogicPlayerClient`,
-   `BotAI`, `AutoAttackMode`.
-2. Hook `MSHookFunction` (ElleKit/Substrate) or Dobby at the mangled symbol,
-   not a fixed offset — offsets move every client update.
-3. Roster fill lives where the battle's player array is constructed; find it by
-   xref to the `OFFLINE_BOT_BRAWLER` string.
-4. Bot input lives in the per-frame logic tick; write the movement vector into
-   the player's input struct before the AI pass, or skip the AI pass entirely.
+It inserts `LC_LOAD_DYLIB @rpath/NullsBotFill.dylib` into the main binary
+(using header padding, no shifting), copies the dylib to
+`Payload/NB.app/Frameworks/`, re-signs the binary ad-hoc with the original
+entitlements and exec-segment fields, and rewrites `__LINKEDIT` to cover the
+new signature. The result still has to be signed with the certificate that
+signed LiveContainer before it will install.
 
-That path needs the decrypted binary in hand. Nothing in this repo can invent
-it.
+Why this is better than the tweak folder: the load command is applied by dyld
+when the guest binary is mapped, so there is no tweak-loader timing, no second
+dylib injection step, and no dependency on LiveContainer's tweak list.
+
+Why it does not help on its own: the mod inside is still the ObjC mod. See the
+next section for what this client actually exposes.
+
+## What this specific client exposes
+
+Measured on `nb_69.252_4cc76283.ipa`:
+
+| Check | Result |
+|---|---|
+| ObjC classes in the main binary | 739, all Zendesk / Firebase / Sentry / AppsFlyer / Recaptcha |
+| Swift types | 355, same set of SDKs |
+| Battle classes in ObjC or Swift | 0 |
+| Engine | C++: `LogicBattleModeClient`, `LogicPlayer`, `LogicCharacter`, `LogicGameObjectManager` |
+| Main binary | 18 MB, thin arm64, `cryptid 0`, 132 load commands |
+| Existing instrumentation | `Frameworks/Frida.framework/W.dylib` + compiled `updated/script_69_252.js`, `config.json` gated by `res/license.bin` |
+
+So on this build the ObjC hook set installs nothing. The dylib loads, dumps the
+candidate list, logs `no hooks installed`, and the game behaves as vanilla.
+That is not a crash and not a bug in the loader: there is simply no ObjC battle
+surface to swizzle.
+
+The string lead was checked too. `OFFLINE_BOT_BRAWLER` is referenced once, at
+`0x1009bca8c`, inside a config-key loader that reads brawler CSV columns into
+fields `+0xd8 .. +0x100` of a per-brawler struct. It is a data column name, not
+the roster constructor, so it is not the hook point.
+
+A working bot fill on this client needs one of:
+
+1. A C++ hook on the battle creation path, found from the server join response,
+   not from a string. That means reading the deserialiser for the join packet
+   and the function that materialises `LogicPlayer` objects from it.
+2. The client's own script platform: `config.json` points the bundled Frida
+   gadget at `updated/script_69_252.js`. That script is compiled bytecode and
+   license-gated, but the gadget itself is present and is the natural place for
+   a C++ `Interceptor` hook if you control the script path.
+
+Both need the binary in a debugger. Neither is a dylib the way the original
+sketch assumed.
+
+For reference, the C++ route once a debugger is attached: locate the join-packet
+deserialiser and the `LogicPlayer` materialisation, hook with `MSHookFunction`
+(ElleKit/Substrate) or Dobby at a resolved address, never a fixed offset —
+offsets move every client update. Bot input lives in the per-frame logic tick;
+write the movement vector into the player's input struct before the AI pass, or
+skip the AI pass.
 
 ## Crash logs
 

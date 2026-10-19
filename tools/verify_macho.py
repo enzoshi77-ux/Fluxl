@@ -13,6 +13,7 @@ import sys
 MH_MAGIC_64 = 0xFEEDFACF
 CPU_ARM64 = 0x0100000C
 MH_DYLIB = 0x6
+MH_EXECUTE = 0x2
 LC_CODE_SIGNATURE = 0x1D
 
 CSMAGIC_EMBEDDED_SIGNATURE = 0xFADE0CC0
@@ -33,8 +34,8 @@ def parse_macho(data):
         die(f"not a 64-bit Mach-O (magic 0x{magic:08x})")
     if cputype != CPU_ARM64:
         die(f"not arm64 (cputype 0x{cputype:08x})")
-    if filetype != MH_DYLIB:
-        die(f"not MH_DYLIB (filetype {filetype})")
+    if filetype not in (MH_DYLIB, MH_EXECUTE):
+        die(f"unexpected filetype {filetype}")
 
     commands = []
     off = 32
