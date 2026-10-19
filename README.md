@@ -3,6 +3,9 @@
 Client-side bot filler for the Null's Brawl iOS client (arm64, iOS 14+), loaded
 as a dylib by LiveContainer.
 
+**[Download v1.0.0](https://github.com/enzoshi77-ux/Fluxl/releases/tag/v1.0.0)**
+— `NullsBotFill.dylib` + config plist, ad-hoc signed.
+
 Match roster becomes: you in slot 0, five passive bots behind you. Bots walk on
 a random heading, never attack, never use a super. Ranked picks are fixed per
 bot and ban requests are swallowed so the server's auto-ban timer resolves the
