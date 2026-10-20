@@ -117,6 +117,17 @@ tweak:
 python3 tools/patch_ipa.py nb.ipa dist/NullsBotFill.dylib out.ipa
 ```
 
+If the IPA already contains the load command and a
+`Frameworks/NullsBotFill.dylib` entry (for example a previous packaging
+release), replace just that entry instead of injecting it again:
+
+```sh
+python3 tools/replace_ipa_dylib.py old.ipa dist/NullsBotFill.dylib new.ipa
+```
+
+That rewrites the dylib member only, verifies its SHA-256, and keeps the zip at
+one dylib entry instead of creating a duplicate.
+
 It inserts `LC_LOAD_DYLIB @rpath/NullsBotFill.dylib` into the main binary
 (using header padding, no shifting), copies the dylib to
 `Payload/NB.app/Frameworks/`, re-signs the binary ad-hoc with the original
@@ -239,5 +250,6 @@ Makefile                  Theos alternative
 sdk-stubs/                Foundation/UIKit/objc headers for SDK-less builds
 tools/verify_macho.py     signature and code-page checker
 tools/verify_plist.py     plist type/slot/brawler-id checker
+tools/replace_ipa_dylib.py update a dylib already baked into an IPA
 dist/NullsBotFill.dylib   built output
 ```
