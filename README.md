@@ -6,6 +6,10 @@ as a dylib by LiveContainer.
 **[Download](https://github.com/enzoshi77-ux/Fluxl/releases/latest)**
 — `NullsBotFill.dylib` + config plist, ad-hoc signed.
 
+Latest: [v1.0.3](https://github.com/enzoshi77-ux/Fluxl/releases/tag/v1.0.3)
+(dylib, plist, research notes, and a 69.252 IPA with the dylib already baked
+in). The dylib is the easiest path; the IPA must be re-signed before install.
+
 Target behavior (only on a build that exposes an Objective-C roster — `69.252`
 does not, see [Research](#research-bots-and-matchmaking)): match roster becomes
 you in slot 0, five passive bots behind you. Bots walk on a random heading,
