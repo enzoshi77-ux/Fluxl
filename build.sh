@@ -19,6 +19,8 @@ MIN_IOS="14.0"
 
 mkdir -p "$ROOT/build" "$ROOT/dist"
 
+python3 "$ROOT/tools/verify_plist.py" "$ROOT/NullsBotFill.plist"
+
 find_tool() {
     local name="$1" override="${2:-}" candidate
     if [ -n "$override" ] && [ -x "$override" ]; then echo "$override"; return; fi

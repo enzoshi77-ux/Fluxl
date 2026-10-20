@@ -1,3 +1,7 @@
 build/
 dist/*.ipa
 .work/
+.tmp/
+.toolchain/
+__pycache__/
+*.pyc
