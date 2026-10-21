@@ -165,6 +165,23 @@ Consequences:
    update; resolve them from the Mach-O at runtime, never hard-code them.
 
 
+## Load-time crash: code-page size
+
+The first builds were ad-hoc signed by `ld64.lld` with 4 KB code slots
+(`pageShift 12`, 29 slots for 118 KB). iOS arm64 expects **16 KB** code pages:
+the vendor frameworks in this IPA are signed with pageShift 14 (for example
+`Sentry`, 2 slots for 34 KB). AMFI rejects a 4 KB-signed image before dyld runs
+its constructor, so the app dies with no `[NBF]` line and no tweak log. This is
+a packaging fault, not an Objective-C fault.
+
+`tools/sign_dylib.py` now rewrites the dylib signature at 16 KB (8 slots), and
+`tools/resign_macho.py` does the same for the app's main binary
+(`nt.nb.ios`, 1097 slots). The IPA's main binary and dylib both verify at
+page 16384. `NBFBootLog` writes `<tmp>/NullsBotFill-boot.log` with plain C
+before any Objective-C call, so a future load failure can be separated from a
+hook/entry failure.
+
+
 ## Crash audit of this dylib
 
 The source was reviewed and the following real crash paths were fixed. None of
@@ -184,9 +201,12 @@ are the paths that could fault after a hook installs.
 
 ## Verification performed
 
-- `./build.sh` with Debian clang 14 + `ld64.lld`: arm64 `MH_DYLIB`, ad-hoc
-  signature, 29 code slots hash-verified. No compiler warnings.
-- `tools/verify_macho.py dist/NullsBotFill.dylib`: `result: OK`.
+- `./build.sh` with Debian clang 14 + `ld64.lld`, then `tools/sign_dylib.py`:
+  arm64 `MH_DYLIB`, ad-hoc signature with **16 KB pages**, 8 code slots
+  hash-verified. No compiler warnings.
+- `tools/verify_macho.py dist/NullsBotFill.dylib`: `result: OK`, page 16384.
+- The IPA main binary is re-signed with 16 KB pages (1097 slots, identifier
+  `nt.nb.ios`); its `LC_LOAD_DYLIB @rpath/NullsBotFill.dylib` is present once.
 - The C type-encoding parser extracted from the source and compiled on the host:
   10/10 cases (`v@:@`, `v24@0:@16`, `v@:@"NSString"`, `v@:i`, `v@:`,
   `v@:@@`, `i@:@`, `v@:f`, NULL).

@@ -18,7 +18,6 @@
 // ---------------------------------------------------------------------------
 
 #import <Foundation/Foundation.h>
-#import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <dispatch/dispatch.h>
@@ -54,6 +53,22 @@ static void NBFLog(NSString *fmt, ...) {
     FILE *fp = fopen([path UTF8String], "a");
     if (!fp) return;
     fputs([[message stringByAppendingString:@"\n"] UTF8String], fp);
+    fclose(fp);
+}
+
+// Plain-C breadcrumb written from the constructor, before any Objective-C
+// call. If the app dies before NullsBotFill.log exists, this file still shows
+// whether dyld loaded the image.
+static void NBFBootLog(const char *message) {
+    const char *tmp = getenv("TMPDIR");
+    if (!tmp || !*tmp) return;
+    char path[1024];
+    int written = snprintf(path, sizeof(path), "%s/NullsBotFill-boot.log", tmp);
+    if (written <= 0 || (size_t)written >= sizeof(path)) return;
+    FILE *fp = fopen(path, "a");
+    if (!fp) return;
+    fputs(message, fp);
+    fputs("\n", fp);
     fclose(fp);
 }
 
@@ -196,7 +211,7 @@ static NSArray *NBFArrayOverride(NSDictionary *dict, NSString *key,
     self.rankedEnabled = YES;
     self.tickSuppressOriginal = YES;
     self.dumpCandidates = YES;
-    self.scanUnlistedClasses = YES;
+    self.scanUnlistedClasses = NO;
     self.dryRun = NO;
 
     return self;
@@ -995,12 +1010,10 @@ static NSString *NBFMakeRoomToken(void) {
     static NSString *token = nil;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        NSString *seed = nil;
-        @try {
-            seed = [[[UIDevice currentDevice] identifierForVendor] UUIDString];
-        } @catch (...) {
-            seed = nil;
-        }
+        // Foundation-only seed: the app container path is per-install and
+        // NSTemporaryDirectory is available by the time a join packet is built.
+        NSString *seed = [NSString stringWithFormat:@"%@-%u",
+                          NSTemporaryDirectory(), arc4random()];
         if (!seed) {
             const char *home = getenv("HOME");
             seed = home ? [NSString stringWithUTF8String:home] : @"NULLS-PRIVATE";
@@ -1227,8 +1240,10 @@ static void NBFInstallAll(void) {
 
 __attribute__((constructor))
 static void NBFInit(void) {
+    NBFBootLog("constructor");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.75 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
+        NBFBootLog("entry block");
         NBFConfig *cfg = [NBFConfig shared];
         NBFLog(@"NullsBotFill loaded, scanning for game classes");
 
@@ -1239,6 +1254,7 @@ static void NBFInit(void) {
 
             if (cfg.dryRun) {
                 NBFLog(@"DryRun set — discovery only, no hooks installed");
+                NBFBootLog("dry run done");
                 return;
             }
 
@@ -1251,8 +1267,10 @@ static void NBFInit(void) {
                        @"Read RESEARCH.md and the candidate dump, then set real "
                        @"class names in NullsBotFill.plist if any exist.");
             }
+            NBFBootLog("install done");
         } @catch (id exception) {
             NBFLog(@"install aborted by exception: %@", exception);
+            NBFBootLog("install exception");
         }
     });
 }

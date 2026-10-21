@@ -64,9 +64,11 @@
 	<key>DryRun</key>
 	<false/>
 
-	<!-- Walk the runtime class list when the configured names are absent. -->
+	<!-- Walk the runtime class list when the configured names are absent.
+	     Off by default: on a client with no ObjC battle classes this can only
+	     match unrelated SDK classes. Enable only for discovery. -->
 	<key>ScanUnlistedClasses</key>
-	<true/>
+	<false/>
 
 	<key>ExcludedModes</key>
 	<array>

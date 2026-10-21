@@ -82,5 +82,6 @@ else
     fi
 fi
 
+python3 "$ROOT/tools/sign_dylib.py" "$OUT"
 python3 "$ROOT/tools/verify_macho.py" "$OUT"
 echo "[build] $OUT"

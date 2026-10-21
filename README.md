@@ -31,10 +31,12 @@ and Bounty are left alone. The join packet carries a per-device room token and
 - `make` is there for Theos setups; it is not required.
 
 `dist/NullsBotFill.dylib` is arm64 `MH_DYLIB`, `LC_CODE_SIGNATURE` present,
-`CS_ADHOC | CS_LINKER_SIGNED`. `tools/verify_macho.py` re-hashes every code
-page on each build and fails the build on a mismatch. `tools/verify_plist.py`
-runs first and rejects wrong types, missing slots, duplicate/negative ids, an
-empty brawler list, or a `16000000` id; add
+ad-hoc signed with **16 KB code pages** (`CS_ADHOC`, 8 code slots). iOS arm64
+uses 16 KB pages; ld64.lld's default 4 KB slots are rejected at load.
+`tools/sign_dylib.py` rewrites the signature after linking,
+`tools/verify_macho.py` re-hashes every code page, and the build fails on a
+mismatch. `tools/verify_plist.py` runs first and rejects wrong types, missing
+slots, duplicate/negative ids, an empty brawler list, or a `16000000` id; add
 `--characters res/csv_logic/characters.csv` to resolve ids to row names.
 
 ## Install
@@ -111,6 +113,10 @@ after a hook installs:
   failed factory no longer empties the team.
 - Bot allocation, player-id writes, and `playerId` conversion are guarded; the
   ranked slot falls back through associated slot → property → `playerId-base`.
+- The dylib is re-signed with **16 KB code pages**. ld64.lld/ldid default to
+  4 KB slots, which iOS arm64 rejects before the constructor runs. The IPA's
+  main binary is re-signed the same way, and `ScanUnlistedClasses` now defaults
+  to `false` so a no-ObjC client cannot hook an unrelated SDK class.
 
 ## IPA route
 
@@ -211,6 +217,7 @@ The tweak's own log:
 
 ```
 <LiveContainer data container>/Documents/Applications/<bundle id>/tmp/NullsBotFill.log
+<LiveContainer data container>/Documents/Applications/<bundle id>/tmp/NullsBotFill-boot.log
 <...>/tmp/NullsBotFill-candidates.txt
 ```
 
@@ -218,9 +225,11 @@ In LiveContainer's Files view: LiveContainer → the app → its data folder →
 Also on the console as `[NBF]` lines: `idevicesyslog -u <udid> | grep NBF`, or
 Console.app with the device selected.
 
-If `NullsBotFill.log` does not exist at all, the crash happened before the
-tweak's 0.75 s entry timer — that rules out every hook and points at load:
-wrong architecture, signature, or a missing dependency.
+If `NullsBotFill.log` does not exist at all, check
+`NullsBotFill-boot.log`. `constructor` means dyld loaded the image; `entry block`
+means the 0.75 s block ran. Neither file means the crash happened before the
+dylib was mapped — that rules out every hook and points at load: wrong page
+size/signature, wrong architecture, or a missing dependency.
 
 ## If it crashes
 
@@ -254,6 +263,9 @@ Makefile                  Theos alternative
 sdk-stubs/                Foundation/UIKit/objc headers for SDK-less builds
 tools/verify_macho.py     signature and code-page checker
 tools/verify_plist.py     plist type/slot/brawler-id checker
+tools/sign_dylib.py       rewrite ad-hoc signature with 16 KB pages
+tools/resign_macho.py     re-sign an existing main binary at 16 KB
 tools/replace_ipa_dylib.py update a dylib already baked into an IPA
+tools/repack_ipa.py       replace arbitrary IPA members without duplicates
 dist/NullsBotFill.dylib   built output
 ```
