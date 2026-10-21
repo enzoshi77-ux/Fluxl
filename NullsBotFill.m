@@ -419,6 +419,13 @@ static void NBFPresentCrashAlert(int attempt) {
     NSString *message = [NSString stringWithFormat:
         @"Copied to the clipboard. Paste it back for a fix.\n\n%@", body];
 
+    // Clear the shown report first: a crash while the alert is on screen must
+    // still land in a fresh file.
+    if (gPreviousRunKind == 1) {
+        unlink(gCrashReportPath);
+        NBFReopenCrashFile();
+    }
+
     @try {
         if (pasteboardClass) {
             id pasteboard = [pasteboardClass generalPasteboard];
@@ -433,12 +440,6 @@ static void NBFPresentCrashAlert(int attempt) {
                                                 style:0
                                               handler:nil]];
         [root presentViewController:alert animated:YES completion:nil];
-
-        // One report, one alert. The clipboard copy is the durable one.
-        if (gPreviousRunKind == 1) {
-            unlink(gCrashReportPath);
-            NBFReopenCrashFile();
-        }
     } @catch (id exception) {
         NBFLog(@"could not present crash alert: %@", exception);
     }
