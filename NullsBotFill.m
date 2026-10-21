@@ -39,27 +39,6 @@ extern void backtrace_symbols_fd(void *const *buffer, int size, int fd);
 
 static NSString *const kConfigFileName = @"NullsBotFill.plist";
 
-// ---------------------------------------------------------------------------
-// LOG + CRASH DETECTOR
-//
-// Two problems this solves:
-//   1. iOS gives the user no crash log, and a crash inside a dylib is invisible
-//      in the app's own report.
-//   2. The process can die before the 0.75 s entry timer, so nothing used to be
-//      written at all.
-//
-// Every line is written straight to a file descriptor and fsync'd, from the
-// first instruction of the constructor onwards. SIGSEGV/SIGABRT/... and
-// uncaught NSExceptions are caught and a backtrace is appended to
-// NullsBotFill-crash.txt. On the next launch that report (or the tail of the
-// log, when the process was killed from outside) is copied to the clipboard and
-// shown in an alert, because that is the only channel that reaches the user on
-// a not-jailbroken iPhone.
-//
-// Files live in <container>/Documents/NullsBotFill/ so they survive a tmp
-// cleanup and show up in the Files / LiveContainer file view.
-// ---------------------------------------------------------------------------
-
 #define NBF_PATH_MAX 1024
 
 static char gLogPath[NBF_PATH_MAX];
@@ -323,37 +302,6 @@ static void NBFLog(NSString *fmt, ...) {
 }
 
 
-// ---------------------------------------------------------------------------
-// KVC PROBING
-// A key that throws does not exist on that object. Resolved once per class,
-// never per frame: KVC exception unwinding is expensive.
-// ---------------------------------------------------------------------------
-
-static id NBFGetProp(id object, NSString *key) {
-    @try {
-        return [object valueForKey:key];
-    } @catch (...) {
-        return nil;
-    }
-}
-
-static BOOL NBFSetProp(id object, NSString *key, id value) {
-    @try {
-        [object setValue:value forKey:key];
-        return YES;
-    } @catch (...) {
-        return NO;
-    }
-}
-
-static BOOL NBFHasKey(id object, NSString *key) {
-    @try {
-        [object valueForKey:key];
-        return YES;
-    } @catch (...) {
-        return NO;
-    }
-}
 // Called before the first log line of this run, so the previous marker and the
 // previous log tail are still intact.
 static void NBFCheckPreviousRun(void) {
@@ -445,7 +393,53 @@ static void NBFPresentCrashAlert(int attempt) {
     }
 }
 
+// Plain-C breadcrumb written from the constructor, before any Objective-C
+// call. If the app dies before NullsBotFill.log exists, this file still shows
+// whether dyld loaded the image.
+static void NBFBootLog(const char *message) {
+    const char *tmp = getenv("TMPDIR");
+    if (!tmp || !*tmp) return;
+    char path[1024];
+    int written = snprintf(path, sizeof(path), "%s/NullsBotFill-boot.log", tmp);
+    if (written <= 0 || (size_t)written >= sizeof(path)) return;
+    FILE *fp = fopen(path, "a");
+    if (!fp) return;
+    fputs(message, fp);
+    fputs("\n", fp);
+    fclose(fp);
+}
 
+// ---------------------------------------------------------------------------
+// KVC PROBING
+// A key that throws does not exist on that object. Resolved once per class,
+// never per frame: KVC exception unwinding is expensive.
+// ---------------------------------------------------------------------------
+
+static id NBFGetProp(id object, NSString *key) {
+    @try {
+        return [object valueForKey:key];
+    } @catch (...) {
+        return nil;
+    }
+}
+
+static BOOL NBFSetProp(id object, NSString *key, id value) {
+    @try {
+        [object setValue:value forKey:key];
+        return YES;
+    } @catch (...) {
+        return NO;
+    }
+}
+
+static BOOL NBFHasKey(id object, NSString *key) {
+    @try {
+        [object valueForKey:key];
+        return YES;
+    } @catch (...) {
+        return NO;
+    }
+}
 
 static BOOL NBFSetFirst(id object, NSArray *keys, id value) {
     for (NSString *key in keys) {
@@ -492,6 +486,27 @@ static const char kBotStateKey  = 3;
 @end
 
 
+static NSArray *NBFArrayOverride(NSDictionary *dict, NSString *key,
+                                 NSArray *fallback, Class elementClass) {
+    id value = [dict objectForKey:key];
+    if (!value) return fallback;
+    if (![value isKindOfClass:[NSArray class]]) {
+        NBFLog(@"ignoring %@: not an array", key);
+        return fallback;
+    }
+    if (elementClass) {
+        for (id item in (NSArray *)value) {
+            if (![item isKindOfClass:elementClass]) {
+                NBFLog(@"ignoring %@: element %@ is not %@",
+                       key, NSStringFromClass([item class]),
+                       NSStringFromClass(elementClass));
+                return fallback;
+            }
+        }
+    }
+    return (NSArray *)value;
+}
+
 @implementation NBFConfig
 
 + (instancetype)shared {
@@ -508,8 +523,8 @@ static const char kBotStateKey  = 3;
     self = [super init];
     if (!self) return nil;
 
-    self.botBrawlerIds = @[ @16000000, @16000001, @16000002, @16000003, @16000004 ];
-    self.rankedBrawlerIds = @[ @16000005, @16000006, @16000007, @16000008, @16000009 ];
+    self.botBrawlerIds = @[ @0, @1, @2, @3, @4 ];
+    self.rankedBrawlerIds = @[ @5, @6, @7, @8, @9 ];
     self.botNames = @[ @"BOT_01", @"BOT_02", @"BOT_03", @"BOT_04", @"BOT_05" ];
     self.excludedModes = @[ @"soloShowdown", @"bounty" ];
     self.playerClasses = @[ @"PlayerEntry", @"BattlePlayer", @"ClientPlayer",
@@ -528,12 +543,12 @@ static const char kBotStateKey  = 3;
                           @"JoinPacketBuilder", @"NetworkManager" ];
     self.joinSelectorNames = @[ @"buildJoinPacket:" ];
 
-    self.botBaseId = 900100;
+    self.botBaseId = 10000100;
     self.walkInterval = 1.5f;
     self.rankedEnabled = YES;
     self.tickSuppressOriginal = YES;
     self.dumpCandidates = YES;
-    self.scanUnlistedClasses = YES;
+    self.scanUnlistedClasses = NO;
     self.dryRun = NO;
 
     return self;
@@ -556,23 +571,40 @@ static const char kBotStateKey  = 3;
         if (!dict) continue;
 
         id value = nil;
-        if ((value = [dict objectForKey:@"BotBrawlerIds"]))    self.botBrawlerIds = value;
-        if ((value = [dict objectForKey:@"RankedBrawlerIds"])) self.rankedBrawlerIds = value;
-        if ((value = [dict objectForKey:@"BotNames"]))         self.botNames = value;
-        if ((value = [dict objectForKey:@"ExcludedModes"]))    self.excludedModes = value;
-        if ((value = [dict objectForKey:@"PlayerClasses"]))    self.playerClasses = value;
-        if ((value = [dict objectForKey:@"SetupClasses"]))     self.setupClasses = value;
-        if ((value = [dict objectForKey:@"SetupSelectors"]))   self.setupSelectors = value;
-        if ((value = [dict objectForKey:@"TickClasses"]))      self.tickClasses = value;
-        if ((value = [dict objectForKey:@"TickSelectors"]))    self.tickSelectors = value;
-        if ((value = [dict objectForKey:@"PickClasses"]))      self.pickClasses = value;
-        if ((value = [dict objectForKey:@"PickSelectors"]))    self.pickSelectorNames = value;
-        if ((value = [dict objectForKey:@"BanSelectors"]))     self.banSelectorNames = value;
-        if ((value = [dict objectForKey:@"JoinClasses"]))      self.joinClasses = value;
-        if ((value = [dict objectForKey:@"JoinSelectors"]))    self.joinSelectorNames = value;
+        self.botBrawlerIds = NBFArrayOverride(dict, @"BotBrawlerIds",
+                                             self.botBrawlerIds, [NSNumber class]);
+        self.rankedBrawlerIds = NBFArrayOverride(dict, @"RankedBrawlerIds",
+                                                self.rankedBrawlerIds, [NSNumber class]);
+        self.botNames = NBFArrayOverride(dict, @"BotNames", self.botNames, [NSString class]);
+        self.excludedModes = NBFArrayOverride(dict, @"ExcludedModes",
+                                             self.excludedModes, [NSString class]);
+        self.playerClasses = NBFArrayOverride(dict, @"PlayerClasses",
+                                             self.playerClasses, [NSString class]);
+        self.setupClasses = NBFArrayOverride(dict, @"SetupClasses",
+                                            self.setupClasses, [NSString class]);
+        self.setupSelectors = NBFArrayOverride(dict, @"SetupSelectors",
+                                              self.setupSelectors, [NSString class]);
+        self.tickClasses = NBFArrayOverride(dict, @"TickClasses",
+                                           self.tickClasses, [NSString class]);
+        self.tickSelectors = NBFArrayOverride(dict, @"TickSelectors",
+                                             self.tickSelectors, [NSString class]);
+        self.pickClasses = NBFArrayOverride(dict, @"PickClasses",
+                                           self.pickClasses, [NSString class]);
+        self.pickSelectorNames = NBFArrayOverride(dict, @"PickSelectors",
+                                                 self.pickSelectorNames, [NSString class]);
+        self.banSelectorNames = NBFArrayOverride(dict, @"BanSelectors",
+                                                self.banSelectorNames, [NSString class]);
+        self.joinClasses = NBFArrayOverride(dict, @"JoinClasses",
+                                           self.joinClasses, [NSString class]);
+        self.joinSelectorNames = NBFArrayOverride(dict, @"JoinSelectors",
+                                                 self.joinSelectorNames, [NSString class]);
 
         if ((value = [dict objectForKey:@"BotBaseId"]))        self.botBaseId = [value intValue];
-        if ((value = [dict objectForKey:@"WalkInterval"]))     self.walkInterval = [value floatValue];
+        if ((value = [dict objectForKey:@"WalkInterval"])) {
+            float interval = [value floatValue];
+            if (interval > 0.0f && interval <= 3600.0f) self.walkInterval = interval;
+            else NBFLog(@"ignoring WalkInterval: %@ is not a positive number", value);
+        }
         if ((value = [dict objectForKey:@"RankedEnabled"]))    self.rankedEnabled = [value boolValue];
         if ((value = [dict objectForKey:@"TickSuppressOriginal"]))
             self.tickSuppressOriginal = [value boolValue];
@@ -592,9 +624,11 @@ static const char kBotStateKey  = 3;
 
 - (int)brawlerIdForSlot:(int)slot ranked:(BOOL)ranked {
     NSArray *source = ranked ? self.rankedBrawlerIds : self.botBrawlerIds;
-    if (![source isKindOfClass:[NSArray class]] || slot < 0) return 0;
+    if (![source isKindOfClass:[NSArray class]] || [source count] == 0) return 0;
+    if (slot < 0) slot = 0;
     if ((NSUInteger)slot >= [source count]) slot = (int)([source count] - 1);
-    return [[source objectAtIndex:(NSUInteger)slot] intValue];
+    id value = [source objectAtIndex:(NSUInteger)slot];
+    return [value respondsToSelector:@selector(intValue)] ? [value intValue] : 0;
 }
 
 @end
@@ -609,6 +643,47 @@ static const char kBotStateKey  = 3;
 static NSMutableSet *gInstalled  = nil;  // "Class::selector" — no double swizzle
 static NSMutableSet *gHookUse    = nil;  // "Class::hookSelector" — one target per hook
 static int gHookCount = 0;
+
+static BOOL NBFParseTickEncoding(const char *types, BOOL *usesDouble);
+
+// Returns YES for exactly  void (id self, SEL _cmd, id argument).
+// Type offsets and ObjC qualifiers are ignored; the caller already knows which
+// selector it is installing and only needs the ABI shape to match.
+static BOOL NBFEncodingTakesSingleObject(const char *types) {
+    if (!types || types[0] != 'v') return NO;
+
+    const char *p = types + 1;
+    while (*p >= '0' && *p <= '9') p++;      // return-value offset
+    if (*p++ != '@') return NO;              // self
+    while (*p >= '0' && *p <= '9') p++;
+    if (*p++ != ':') return NO;              // _cmd
+    while (*p >= '0' && *p <= '9') p++;
+
+    while (*p == 'r' || *p == 'n' || *p == 'N' || *p == 'o' ||
+           *p == 'O' || *p == 'R' || *p == 'V') p++;
+    if (*p++ != '@') return NO;              // argument
+
+    if (*p == '"') {                         // @"ClassName"
+        p++;
+        while (*p && *p != '"') p++;
+        if (*p == '"') p++;
+    }
+    while (*p >= '0' && *p <= '9') p++;      // argument offset
+    return *p == '\0';
+}
+
+// A method exchanged into a superclass must never be exchanged a second time
+// into a subclass: the subclass trampoline would call itself forever. This
+// checks whether an ancestor already owns the hooked selector.
+static BOOL NBFAncestorHooked(Class target, SEL gameSel) {
+    NSString *selName = [NSString stringWithUTF8String:sel_getName(gameSel)];
+    for (Class cls = class_getSuperclass(target); cls; cls = class_getSuperclass(cls)) {
+        NSString *tag = [NSString stringWithFormat:@"%s::%@",
+                         class_getName(cls), selName];
+        if ([gInstalled containsObject:tag]) return YES;
+    }
+    return NO;
+}
 
 static BOOL NBFInstallMethod(Class target, SEL gameSel, Class hookClass, SEL hookSel) {
     if (!target || !gameSel || !hookClass || !hookSel) return NO;
@@ -629,24 +704,75 @@ static BOOL NBFInstallMethod(Class target, SEL gameSel, Class hookClass, SEL hoo
 
     Method game = class_getInstanceMethod(target, gameSel);
     Method hook = class_getInstanceMethod(hookClass, hookSel);
-    if (!game || !hook) return NO;
-
-    class_addMethod(target, hookSel,
-                    method_getImplementation(hook),
-                    method_getTypeEncoding(hook));
-
-    Method installed = class_getInstanceMethod(target, hookSel);
-    if (!installed) return NO;
-
-    // If addMethod failed and the selector resolves to a superclass method,
-    // installing would rewrite the superclass for every subclass. Bail.
-    Class super = class_getSuperclass(target);
-    if (super && class_getInstanceMethod(super, hookSel) == installed) {
-        NBFLog(@"skip -[%s %s]: hook selector resolves outside the class",
+    if (!game || !hook) {
+        NBFLog(@"skip -[%s %s]: method missing",
                class_getName(target), sel_getName(gameSel));
         return NO;
     }
-    if (method_getImplementation(installed) != method_getImplementation(hook)) {
+
+    const char *gameTypes = method_getTypeEncoding(game);
+    if (hookSel == @selector(nbf_tickF:) || hookSel == @selector(nbf_tickD:)) {
+        BOOL usesDouble = NO;
+        BOOL isTick = NBFParseTickEncoding(gameTypes, &usesDouble);
+        BOOL wantsDouble = (hookSel == @selector(nbf_tickD:));
+        if (!isTick || usesDouble != wantsDouble) {
+            NBFLog(@"skip -[%s %s]: tick encoding %s does not match trampoline",
+                   class_getName(target), sel_getName(gameSel), gameTypes);
+            return NO;
+        }
+    } else if (!NBFEncodingTakesSingleObject(gameTypes)) {
+        // Calling a method that takes an int, no argument, or two arguments
+        // through a (id) trampoline is an ABI fault, not a catchable exception.
+        NBFLog(@"skip -[%s %s]: encoding %s is not (id)",
+               class_getName(target), sel_getName(gameSel), gameTypes);
+        return NO;
+    }
+
+    Class super = class_getSuperclass(target);
+    BOOL inherited = (super != Nil && class_getInstanceMethod(super, gameSel) == game);
+
+    // The superclass hook already covers instances of this class. Only install
+    // here when this class defines its own override.
+    if (inherited && NBFAncestorHooked(target, gameSel)) {
+        NBFLog(@"skip -[%s %s]: covered by a superclass hook",
+               class_getName(target), sel_getName(gameSel));
+        return NO;
+    }
+
+    // Give the target its own copy of the game method. Without this, an
+    // inherited method would be exchanged in the superclass and a later hook
+    // on a sibling class would trampoline into itself.
+    if (inherited) {
+        if (!class_addMethod(target, gameSel,
+                             method_getImplementation(game),
+                             gameTypes)) {
+            NBFLog(@"skip -[%s %s]: could not materialise own method",
+                   class_getName(target), sel_getName(gameSel));
+            return NO;
+        }
+        game = class_getInstanceMethod(target, gameSel);
+        if (!game) return NO;
+    }
+
+    // The trampoline selector must be new on this class. class_getInstanceMethod
+    // also finds inherited methods, so any hit means it is not ours to add.
+    if (class_getInstanceMethod(target, hookSel) != NULL) {
+        NBFLog(@"skip -[%s %s]: trampoline selector already exists",
+               class_getName(target), sel_getName(gameSel));
+        return NO;
+    }
+
+    if (!class_addMethod(target, hookSel,
+                         method_getImplementation(hook),
+                         method_getTypeEncoding(hook))) {
+        NBFLog(@"skip -[%s %s]: trampoline could not be added",
+               class_getName(target), sel_getName(gameSel));
+        return NO;
+    }
+
+    Method installed = class_getInstanceMethod(target, hookSel);
+    if (!installed ||
+        method_getImplementation(installed) != method_getImplementation(hook)) {
         NBFLog(@"skip -[%s %s]: hook implementation did not land",
                class_getName(target), sel_getName(gameSel));
         return NO;
@@ -722,18 +848,47 @@ static BOOL NBFIsBotPlayer(id object) {
 
     NBFConfig *cfg = [NBFConfig shared];
     id pid = NBFGetProp(object, @"playerId") ?: NBFGetProp(object, @"playerID");
-    if (pid) {
+    if ([pid respondsToSelector:@selector(longLongValue)]) {
         long long value = [pid longLongValue];
         if (value >= cfg.botBaseId && value < (long long)cfg.botBaseId + 16) return YES;
     }
 
     NSString *name = NBFGetProp(object, @"name");
-    if ([name isKindOfClass:[NSString class]]) {
+    if ([name isKindOfClass:[NSString class]] &&
+        [cfg.botNames isKindOfClass:[NSArray class]]) {
         for (NSString *botName in cfg.botNames) {
             if ([name isEqualToString:botName]) return YES;
         }
     }
     return NO;
+}
+
+// The slot decides the brawler. Prefer the value stamped at creation, then a
+// property, then the synthetic player id. Never let a negative slot wrap into
+// objectAtIndex:.
+static int NBFSlotForPlayer(id player) {
+    NBFConfig *cfg = [NBFConfig shared];
+    int slot = -1;
+
+    NSNumber *stamped = objc_getAssociatedObject(player, &kBotSlotKey);
+    if ([stamped isKindOfClass:[NSNumber class]]) slot = [stamped intValue];
+
+    if (slot < 0) {
+        id value = NBFGetProp(player, @"botSlot");
+        if ([value respondsToSelector:@selector(intValue)]) slot = [value intValue];
+    }
+
+    if (slot < 0) {
+        id pid = NBFGetProp(player, @"playerId") ?: NBFGetProp(player, @"playerID");
+        if ([pid respondsToSelector:@selector(longLongValue)]) {
+            long long value = [pid longLongValue] - cfg.botBaseId;
+            if (value >= 0 && value < 16) slot = (int)value;
+        }
+    }
+
+    if (slot < 0) slot = 0;
+    if (slot > 4) slot = 4;
+    return slot;
 }
 
 static BOOL NBFIsBotEntity(id entity) {
@@ -884,17 +1039,35 @@ static id NBFCreateBot(int slot, BOOL ranked) {
     if (!cls) return nil;
 
     NBFConfig *cfg = [NBFConfig shared];
-    if ((NSUInteger)slot >= [cfg.botNames count]) return nil;
+    if (slot < 0 || slot > 4) return nil;
+    if (![cfg.botNames isKindOfClass:[NSArray class]] ||
+        (NSUInteger)slot >= [cfg.botNames count]) return nil;
+    id name = [cfg.botNames objectAtIndex:(NSUInteger)slot];
+    if (![name isKindOfClass:[NSString class]]) return nil;
 
-    id bot = [[cls alloc] init];
-    if (!bot) return nil;
+    // Allocating an unknown game class is still the riskiest operation here:
+    // an -init that touches uninitialised C++ members faults below @try. The
+    // class is only used after the property probe in NBFResolvePlayerClass.
+    id bot = nil;
+    @try {
+        bot = [[cls alloc] init];
+    } @catch (id exception) {
+        NBFLog(@"bot alloc for %s threw: %@", class_getName(cls), exception);
+        return nil;
+    }
+    if (!bot || ![bot isKindOfClass:cls]) return nil;
 
     NSNumber *brawlerId = @([cfg brawlerIdForSlot:slot ranked:ranked]);
     NSNumber *playerId  = @(cfg.botBaseId + slot);
 
-    NBFSetProp(bot, @"playerId", playerId);
-    NBFSetProp(bot, @"playerID", playerId);
-    NBFSetProp(bot, @"name", [cfg.botNames objectAtIndex:(NSUInteger)slot]);
+    // If the identity cannot be written the entity will look human to every
+    // later hook. Do not inject it at all.
+    if (!NBFSetFirst(bot, @[ @"playerId", @"playerID" ], playerId)) {
+        NBFLog(@"bot class %s exposes no player id setter, injection skipped",
+               class_getName(cls));
+        return nil;
+    }
+    NBFSetProp(bot, @"name", name);
     NBFSetProp(bot, @"brawlerId", brawlerId);
 
     // OFFLINE_BOT_BRAWLER path: the client resolves the bot's own logic from
@@ -1034,26 +1207,37 @@ static void NBFStepBot(id entity, double delta) {
         return;
     }
 
-    // Slot 0 is the local player. Everything after it is replaced.
+    // Slot 0 is the local player. Everything after it is replaced only after
+    // at least one bot could actually be built: a failed injection must leave
+    // the original roster alone rather than emptying the team.
     id localPlayer = [players firstObject];
-    [players removeAllObjects];
-    if (localPlayer) [players addObject:localPlayer];
+    if (!localPlayer) {
+        NBFLog(@"[%@] empty roster, injection skipped", NSStringFromClass([self class]));
+        return;
+    }
 
-    int added = 0;
+    NSMutableArray *bots = [NSMutableArray arrayWithCapacity:5];
     for (int slot = 0; slot < 5; slot++) {
         id bot = NBFCreateBot(slot, ranked);
-        if (!bot) break;
-        [players addObject:bot];
-        added++;
+        if (bot) [bots addObject:bot];
     }
+    if ([bots count] == 0) {
+        NBFLog(@"[%@] no bot could be created, roster untouched",
+               NSStringFromClass([self class]));
+        return;
+    }
+
+    NSMutableArray *filled = [NSMutableArray arrayWithCapacity:[bots count] + 1];
+    [filled addObject:localPlayer];
+    [filled addObjectsFromArray:bots];
 
     for (NSString *key in rosterKeys) {
-        if (NBFHasKey(self, key)) NBFSetProp(self, key, players);
+        if (NBFHasKey(self, key)) NBFSetProp(self, key, filled);
     }
 
-    NBFLog(@"%@ %@: roster %lu -> %d bots",
+    NBFLog(@"[%@] %@: roster %lu -> %lu bots",
            NSStringFromClass([self class]), ranked ? @"ranked" : @"normal",
-           (unsigned long)[players count], added);
+           (unsigned long)[players count], (unsigned long)[bots count]);
 }
 
 @end
@@ -1123,9 +1307,7 @@ static BOOL NBFCallBrawlerAssign(id target, SEL sel, NSNumber *brawlerId, id pla
     }
 
     NBFConfig *cfg = [NBFConfig shared];
-    int slot = [NBFGetProp(player, @"botSlot") intValue];
-    if (slot < 0) slot = 0;
-    if (slot > 4) slot = 4;
+    int slot = NBFSlotForPlayer(player);
 
     NSNumber *brawlerId = @([cfg brawlerIdForSlot:slot ranked:YES]);
     NBFSetProp(player, @"brawlerId", brawlerId);
@@ -1165,12 +1347,10 @@ static NSString *NBFMakeRoomToken(void) {
     static NSString *token = nil;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        NSString *seed = nil;
-        @try {
-            seed = [[[UIDevice currentDevice] identifierForVendor] UUIDString];
-        } @catch (...) {
-            seed = nil;
-        }
+        // Foundation-only seed: the app container path is per-install and
+        // NSTemporaryDirectory is available by the time a join packet is built.
+        NSString *seed = [NSString stringWithFormat:@"%@-%u",
+                          NSTemporaryDirectory(), arc4random()];
         if (!seed) {
             const char *home = getenv("HOME");
             seed = home ? [NSString stringWithUTF8String:home] : @"NULLS-PRIVATE";
@@ -1284,36 +1464,6 @@ static void NBFDumpCandidates(void) {
 // INSTALL
 // ---------------------------------------------------------------------------
 
-// v<off>@:<off>[@<off>] — void return, self, _cmd and at most one object
-// argument. The hooks below all take exactly one object, so anything else is
-// skipped instead of being called with a missing argument.
-static BOOL NBFEncodingTakesOneObject(const char *types) {
-    if (!types || types[0] != 'v') return NO;
-    const char *p = types + 1;
-    while (*p >= '0' && *p <= '9') p++;
-    if (*p++ != '@') return NO;
-    while (*p >= '0' && *p <= '9') p++;
-    if (*p++ != ':') return NO;
-    while (*p >= '0' && *p <= '9') p++;
-    if (*p == '\0') return YES;
-    if (*p++ != '@') return NO;
-    while (*p >= '0' && *p <= '9') p++;
-    return *p == '\0';
-}
-
-static BOOL NBFInstallOneObjectHook(Class cls, SEL sel,
-                                    Class hookClass, SEL hookSel) {
-    Method method = class_getInstanceMethod(cls, sel);
-    if (!method) return NO;
-    if (!NBFEncodingTakesOneObject(method_getTypeEncoding(method))) {
-        NBFLog(@"skip -[%s %s]: encoding %s is not a one-object hook",
-               class_getName(cls), sel_getName(sel),
-               method_getTypeEncoding(method));
-        return NO;
-    }
-    return NBFInstallMethod(cls, sel, hookClass, hookSel);
-}
-
 // Visits classes that define (not inherit) one of the given selectors.
 static void NBFScanClasses(NSArray *selectorNames,
                            void (^visit)(Class cls, SEL sel)) {
@@ -1373,9 +1523,9 @@ static void NBFInstallAll(void) {
         Class cls = NSClassFromString(className);
         if (!cls) continue;
         for (NSString *selName in cfg.setupSelectors) {
-            NBFInstallOneObjectHook(cls, NSSelectorFromString(selName),
-                                    [NBFSetupHook class],
-                                    @selector(nbf_applyMatchConfig:));
+            NBFInstallMethod(cls, NSSelectorFromString(selName),
+                             [NBFSetupHook class],
+                             @selector(nbf_applyMatchConfig:));
         }
     }
 
@@ -1401,14 +1551,14 @@ static void NBFInstallAll(void) {
         Class cls = NSClassFromString(className);
         if (!cls) continue;
         for (NSString *selName in cfg.pickSelectorNames) {
-            NBFInstallOneObjectHook(cls, NSSelectorFromString(selName),
-                                    [NBFRankedHook class],
-                                    @selector(nbf_pickForPlayer:));
+            NBFInstallMethod(cls, NSSelectorFromString(selName),
+                             [NBFRankedHook class],
+                             @selector(nbf_pickForPlayer:));
         }
         for (NSString *selName in cfg.banSelectorNames) {
-            NBFInstallOneObjectHook(cls, NSSelectorFromString(selName),
-                                    [NBFRankedHook class],
-                                    @selector(nbf_banForPlayer:));
+            NBFInstallMethod(cls, NSSelectorFromString(selName),
+                             [NBFRankedHook class],
+                             @selector(nbf_banForPlayer:));
         }
     }
 
@@ -1417,9 +1567,9 @@ static void NBFInstallAll(void) {
         Class cls = NSClassFromString(className);
         if (!cls) continue;
         for (NSString *selName in cfg.joinSelectorNames) {
-            NBFInstallOneObjectHook(cls, NSSelectorFromString(selName),
-                                    [NBFJoinHook class],
-                                    @selector(nbf_buildJoinPacket:));
+            NBFInstallMethod(cls, NSSelectorFromString(selName),
+                             [NBFJoinHook class],
+                             @selector(nbf_buildJoinPacket:));
         }
     }
 
@@ -1432,6 +1582,8 @@ static void NBFInstallAll(void) {
 
 __attribute__((constructor))
 static void NBFInit(void) {
+    NBFBootLog("constructor");
+
     // Logging and crash detection come first: if anything below or in the app
     // faults, the reason is already on disk before the app can die.
     NBFSetupPaths();
@@ -1445,6 +1597,7 @@ static void NBFInit(void) {
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.75 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
+        NBFBootLog("entry block");
         gBootStage = 1;
         NBFWriteMarker("booting");
         NBFInstallExceptionHandler();
@@ -1470,17 +1623,22 @@ static void NBFInit(void) {
 
             if (cfg.dryRun) {
                 NBFLog(@"DryRun set — discovery only, no hooks installed");
+                NBFBootLog("dry run done");
             } else {
                 NBFInstallAll();
 
                 if (gHookCount == 0) {
                     NBFLog(@"no hooks installed — this build exposes no matching ObjC "
-                           @"surface; read the candidate dump and set the class names "
-                           @"in NullsBotFill.plist");
+                           @"surface. That is expected on 69.252 (battle logic is C++); "
+                           @"use the native Bot matchmaking override or a C++ hook. "
+                           @"Read RESEARCH.md and the candidate dump, then set real "
+                           @"class names in NullsBotFill.plist if any exist.");
                 }
+                NBFBootLog("install done");
             }
         } @catch (id exception) {
             NBFLog(@"install aborted by exception: %@", exception);
+            NBFBootLog("install exception");
         }
 
         gBootStage = 2;

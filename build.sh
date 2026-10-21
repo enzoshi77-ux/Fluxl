@@ -19,6 +19,8 @@ MIN_IOS="14.0"
 
 mkdir -p "$ROOT/build" "$ROOT/dist"
 
+python3 "$ROOT/tools/verify_plist.py" "$ROOT/NullsBotFill.plist"
+
 find_tool() {
     local name="$1" override="${2:-}" candidate
     if [ -n "$override" ] && [ -x "$override" ]; then echo "$override"; return; fi
@@ -80,9 +82,6 @@ else
     fi
 fi
 
-python3 "$ROOT/tools/verify_macho.py" "$OUT" || {
-    echo "[build] linker produced no signature, signing with tools/sign_dylib.py"
-    python3 "$ROOT/tools/sign_dylib.py" "$OUT"
-    python3 "$ROOT/tools/verify_macho.py" "$OUT"
-}
+python3 "$ROOT/tools/sign_dylib.py" "$OUT"
+python3 "$ROOT/tools/verify_macho.py" "$OUT"
 echo "[build] $OUT"

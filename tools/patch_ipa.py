@@ -30,7 +30,7 @@ CSSLOT_CODEDIRECTORY = 0
 CSSLOT_ENTITLEMENTS = 5
 CS_ADHOC = 0x2
 CS_EXECSEG_MAIN_BINARY = 0x1
-PAGE = 4096
+PAGE = 16384
 HASH_SIZE = 32
 
 
@@ -132,7 +132,7 @@ def build_codedirectory(identifier, code_limit, pages, entitlements, exec_limit)
         ">IIIIIIIIIBBBBIIIIQQQQ",
         0xFADE0C02, length, version, flags, hash_off, 88,
         n_special, len(pages), code_limit,
-        HASH_SIZE, 2, 0, 12,              # hashSize, sha256, platform, pageShift
+        HASH_SIZE, 2, 0, PAGE.bit_length() - 1,  # hashSize, sha256, platform, pageShift
         0, 0, 0, 0,                       # spare2, scatterOffset, teamOffset, spare3
         0,                                # codeLimit64 (0 = use codeLimit)
         0, exec_limit, exec_flags,        # execSegBase, execSegLimit, execSegFlags

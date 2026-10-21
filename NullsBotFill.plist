@@ -6,22 +6,25 @@
 	     NullsBotFill.plist, or into <container>/Documents/Tweaks/. It is
 	     optional: without it the defaults compiled into the dylib are used. -->
 
+	<!-- Row indices in characters.csv, not GlobalIds: the client encodes a
+	     brawler as GlobalId(16, row). 0..4 = ShotgunGirl, Gunslinger, BullDude,
+	     RocketGirl, TrickshotDude. 1600000x are not valid character ids. -->
 	<key>BotBrawlerIds</key>
 	<array>
-		<integer>16000000</integer>
-		<integer>16000001</integer>
-		<integer>16000002</integer>
-		<integer>16000003</integer>
-		<integer>16000004</integer>
+		<integer>0</integer>
+		<integer>1</integer>
+		<integer>2</integer>
+		<integer>3</integer>
+		<integer>4</integer>
 	</array>
 
 	<key>RankedBrawlerIds</key>
 	<array>
-		<integer>16000005</integer>
-		<integer>16000006</integer>
-		<integer>16000007</integer>
-		<integer>16000008</integer>
-		<integer>16000009</integer>
+		<integer>5</integer>
+		<integer>6</integer>
+		<integer>7</integer>
+		<integer>8</integer>
+		<integer>9</integer>
 	</array>
 
 	<key>BotNames</key>
@@ -33,8 +36,11 @@
 		<string>BOT_05</string>
 	</array>
 
+	<!-- Synthetic player-id base. Public v41 server code encodes bot players as
+	     10000000 + 100..200; any unique range works, so keep this away from
+	     real account ids. Slots are BotBaseId .. BotBaseId+4. -->
 	<key>BotBaseId</key>
-	<integer>900100</integer>
+	<integer>10000100</integer>
 
 	<key>WalkInterval</key>
 	<real>1.5</real>
@@ -59,9 +65,11 @@
 	<key>DryRun</key>
 	<false/>
 
-	<!-- Walk the runtime class list when the configured names are absent. -->
+	<!-- Walk the runtime class list when the configured names are absent.
+	     Off by default: on a client with no ObjC battle classes this can only
+	     match unrelated SDK classes. Enable only for discovery. -->
 	<key>ScanUnlistedClasses</key>
-	<true/>
+	<false/>
 
 	<key>ExcludedModes</key>
 	<array>
