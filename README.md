@@ -20,6 +20,8 @@ per-device room token and `maxPlayers = 1`.
 
 - Linux or macOS, no Apple SDK required: clang + `ld64.lld`, headers from
   `sdk-stubs/`. Output `dist/NullsBotFill.dylib`, ad-hoc signed by the linker.
+- If the linker emits no `LC_CODE_SIGNATURE` (some builds of `ld64.lld` and
+  `zig cc`), `build.sh` adds one and signs with `tools/sign_dylib.py`.
 - With an iPhoneOS SDK present (`xcrun`), the real headers are used instead.
 - `CLANG=`, `LD64LLD=`, `SDK=` override tool discovery.
 - `make` is there for Theos setups; it is not required.
@@ -34,8 +36,10 @@ page on each build and fails the build on a mismatch.
    In LiveContainer: app long-press → Settings → Tweaks → add the dylib.
 2. Optional: copy `NullsBotFill.plist` to the same app container's
    `Documents/` folder to override defaults.
-3. Launch. Read `<container>/tmp/NullsBotFill.log` (also on the console via
-   `NSLog`) for what bound and what did not.
+3. Launch. Everything is logged to
+   `<container>/Documents/NullsBotFill/NullsBotFill.log`, with a copy of the
+   important lines on the console as `[NBF]`. If the launch crashes, the next
+   launch shows an alert with the report already copied to the clipboard.
 
 ## Verification status
 
@@ -124,48 +128,81 @@ offsets move every client update. Bot input lives in the per-frame logic tick;
 write the movement vector into the player's input struct before the AI pass, or
 skip the AI pass.
 
-## Crash logs
+## Crash logs — the built-in detector
 
-The app's own crash report:
+The dylib is its own crash reporter, because a not-jailbroken iPhone will not
+hand over the app's `.ips` reliably. From the first instruction of its
+constructor it:
+
+1. opens `<container>/Documents/NullsBotFill/NullsBotFill.log` and writes every
+   line with `write(2)` + `fsync(2)`, so the line survives an immediate kill;
+2. writes `NullsBotFill.session` before startup and again when startup finishes;
+3. installs handlers for `SIGSEGV`, `SIGABRT`, `SIGBUS`, `SIGILL`, `SIGFPE`,
+   `SIGTRAP` and uncaught `NSException`s, each appending the signal, boot stage
+   and a `backtrace()` to `NullsBotFill-crash.txt`;
+4. on the next launch, detects that report (or, for a kill that bypassed the
+   handlers, the fact that the previous session never reached `ready`), copies
+   the last ~1.8 KB to the clipboard and shows an alert.
+
+So after a crash: relaunch the game, tap **OK**, then paste into a reply. Nothing
+else is needed. The full files stay in the app's data container:
+
+```
+<container>/Documents/NullsBotFill/NullsBotFill.log
+<container>/Documents/NullsBotFill/NullsBotFill-crash.txt
+<container>/Documents/NullsBotFill/NullsBotFill-candidates.txt
+<container>/Documents/NullsBotFill/NullsBotFill.session
+```
+
+In LiveContainer's Files view: LiveContainer → the app → its data folder →
+Documents → NullsBotFill. On the console the same lines appear as `[NBF]`:
+
+```sh
+idevicesyslog -u <udid> | grep NBF
+```
+
+`NullsBotFill.log` starts with `=== NullsBotFill launch ===` on every launch,
+then `log file:`, `entry timer fired`, each `hooked -[Class sel]`, and finally
+`startup complete`. Whichever line is last is the last thing that ran.
+
+### Reading the outcome
+
+| What you see | What it means |
+|---|---|
+| Alert on next launch, `NullsBotFill-crash.txt` non-empty | The fault was caught. The backtrace names the signal and the boot stage. Send the pasted text. |
+| Alert saying "ended early", no crash file | The process was killed from outside (watchdog, force-quit, jetsam). The pasted log tail shows the last step reached. |
+| `NullsBotFill.log` exists but stops at `entry timer fired` | Crash inside the install pass. The last line names the suspect hook; set `DryRun` to `true` to confirm. |
+| No `NullsBotFill/` folder at all | The dylib never ran. That is a load problem — architecture, signature, or a missing dependency — not a hook. |
+| Alert never appears and the log reaches `startup complete` | No crash was detected; the symptom is elsewhere. Send the log. |
+
+The OS-level report is still worth one look when the dylib never loads:
+Settings → Privacy & Security → Analytics & Improvements → Analytics Data →
+search the app name ("Share iPhone Analytics" must be on). In the `.ips`, check
+`Exception Type`, `Termination Reason`, `Last Exception Backtrace` and whether
+`Binary Images` lists `NullsBotFill.dylib`.
+
+Console/crash-report locations for the other setups:
 
 | Setup | Where |
 |---|---|
-| iOS, no jailbreak | Settings → Privacy & Security → Analytics & Improvements → Analytics Data → search the app name. Requires "Share iPhone Analytics" to be on. |
 | Xcode | Window → Devices and Simulators → pick device → View Device Logs |
 | macOS, synced | `~/Library/Logs/CrashReporter/MobileDevice/<device name>/` |
 | Windows, synced | `%APPDATA%\Apple Computer\Logs\CrashReporter\MobileDevice\<device name>\` |
 | Linux | `idevicecrashreport -u <udid> -e ./crashes` (libimobiledevice) |
 | Jailbroken | `/var/mobile/Library/Logs/CrashReporter/` |
 
-In the `.ips`, the three fields that matter: `Exception Type`, `Termination
-Reason`, and `Last Exception Backtrace`. Then check `Binary Images` for
-`NullsBotFill.dylib` — if it is listed, the dylib loaded and the crash came
-after load.
-
-The tweak's own log:
-
-```
-<LiveContainer data container>/Documents/Applications/<bundle id>/tmp/NullsBotFill.log
-<...>/tmp/NullsBotFill-candidates.txt
-```
-
-In LiveContainer's Files view: LiveContainer → the app → its data folder → tmp.
-Also on the console as `[NBF]` lines: `idevicesyslog -u <udid> | grep NBF`, or
-Console.app with the device selected.
-
-If `NullsBotFill.log` does not exist at all, the crash happened before the
-tweak's 0.75 s entry timer — that rules out every hook and points at load:
-wrong architecture, signature, or a missing dependency.
-
 ## If it crashes
 
-1. Set `DryRun` to `true` in the plist, relaunch.
-2. Still crashes → load path, not our hooks. Check `file dist/NullsBotFill.dylib`
-   reports arm64 and that LiveContainer is not refusing the signature.
-3. No longer crashes → a hook is the cause. The log names every hook that
-   installed, in order; the last one before the crash is the suspect. Remove
-   that class from the matching list in the plist and relaunch — no rebuild.
-4. Send the log plus the `.ips` back with the last `[NBF]` line intact.
+1. Relaunch once. The alert is the report. Copy it back with the last `[NBF]`
+   line intact.
+2. No alert and no log folder → load path, not our hooks. Check
+   `file dist/NullsBotFill.dylib` says arm64 and that LiveContainer is not
+   refusing the signature.
+3. Alert says the install pass died → set `DryRun` to `true` in the plist,
+   relaunch. Still crashes with `DryRun` → load path. No longer crashes → a hook
+   is the cause; the last `hooked -[...]` line before `entry timer fired` names
+   it. Remove that class from the matching list in the plist and relaunch — no
+   rebuild.
 
 
 `BotBrawlerIds`, `RankedBrawlerIds`, `BotNames`, `BotBaseId`, `WalkInterval`,
@@ -187,5 +224,6 @@ build.sh                  compile + link + verify
 Makefile                  Theos alternative
 sdk-stubs/                Foundation/UIKit/objc headers for SDK-less builds
 tools/verify_macho.py     signature and code-page checker
+tools/sign_dylib.py       add LC_CODE_SIGNATURE + ad-hoc sign
 dist/NullsBotFill.dylib   built output
 ```

@@ -76,6 +76,7 @@ void NSLog(NSString *fmt, ...);
 - (NSUInteger)count;
 - (id)objectAtIndex:(NSUInteger)index;
 - (id)firstObject;
+- (id)lastObject;
 - (BOOL)containsObject:(id)obj;
 - (NSUInteger)countByEnumeratingWithState:(void *)state objects:(id *)buffer count:(NSUInteger)len;
 - (NSMutableArray *)mutableCopy;
@@ -124,5 +125,25 @@ void NSLog(NSString *fmt, ...);
 - (float)floatValue;
 - (double)doubleValue;
 @end
+
+NSString *NSHomeDirectory(void);
+
+@interface NSFileManager : NSObject
++ (NSFileManager *)defaultManager;
+- (BOOL)createDirectoryAtPath:(NSString *)path
+  withIntermediateDirectories:(BOOL)create
+                   attributes:(id)attributes
+                        error:(id *)error;
+- (BOOL)fileExistsAtPath:(NSString *)path;
+- (BOOL)removeItemAtPath:(NSString *)path error:(id *)error;
+@end
+
+@interface NSException : NSObject
+- (NSString *)name;
+- (NSString *)reason;
+@end
+
+typedef void (*NSUncaughtExceptionHandler)(NSException *exception);
+void NSSetUncaughtExceptionHandler(NSUncaughtExceptionHandler handler);
 
 #endif

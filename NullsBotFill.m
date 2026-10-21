@@ -24,21 +24,271 @@
 #import <dispatch/dispatch.h>
 
 #include <math.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <unistd.h>
 
-static NSString *const kLogFileName    = @"NullsBotFill.log";
+// Declared here instead of <execinfo.h> so the SDK-less build does not need
+// another stub. Both symbols live in libsystem on iOS.
+extern int backtrace(void **buffer, int size);
+extern void backtrace_symbols_fd(void *const *buffer, int size, int fd);
+
 static NSString *const kConfigFileName = @"NullsBotFill.plist";
 
-static NSString *NBFLogPath(void) {
-    static NSString *path = nil;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        NSString *tmp = NSTemporaryDirectory();
-        if (tmp) path = [tmp stringByAppendingString:kLogFileName];
-    });
-    return path;
+// ---------------------------------------------------------------------------
+// LOG + CRASH DETECTOR
+//
+// Two problems this solves:
+//   1. iOS gives the user no crash log, and a crash inside a dylib is invisible
+//      in the app's own report.
+//   2. The process can die before the 0.75 s entry timer, so nothing used to be
+//      written at all.
+//
+// Every line is written straight to a file descriptor and fsync'd, from the
+// first instruction of the constructor onwards. SIGSEGV/SIGABRT/... and
+// uncaught NSExceptions are caught and a backtrace is appended to
+// NullsBotFill-crash.txt. On the next launch that report (or the tail of the
+// log, when the process was killed from outside) is copied to the clipboard and
+// shown in an alert, because that is the only channel that reaches the user on
+// a not-jailbroken iPhone.
+//
+// Files live in <container>/Documents/NullsBotFill/ so they survive a tmp
+// cleanup and show up in the Files / LiveContainer file view.
+// ---------------------------------------------------------------------------
+
+#define NBF_PATH_MAX 1024
+
+static char gLogPath[NBF_PATH_MAX];
+static char gCrashReportPath[NBF_PATH_MAX];
+static char gMarkerPath[NBF_PATH_MAX];
+static char gCandidatePath[NBF_PATH_MAX];
+
+static FILE *gLogFile = NULL;
+static FILE *gCrashFile = NULL;
+static int   gCrashFD = -1;
+
+// 0 constructor running, 1 entry timer fired, 2 install pass done.
+static volatile int gBootStage = 0;
+static volatile sig_atomic_t gInCrashHandler = 0;
+
+// Set when the previous run did not get through startup.
+static int   gPreviousRunKind = 0;    // 0 clean, 1 crash report, 2 unclean start
+static char *gPreviousRunText = NULL; // malloc'd, truncated for the alert
+
+static void NBFWriteAll(int fd, const char *text) {
+    if (fd < 0 || !text) return;
+    size_t left = strlen(text);
+    while (left > 0) {
+        ssize_t written = write(fd, text, left);
+        if (written <= 0) break;
+        text += written;
+        left -= (size_t)written;
+    }
+}
+
+static int NBFFlushFile(FILE *fp) {
+    if (!fp) return -1;
+    fflush(fp);
+    int fd = fileno(fp);
+    if (fd >= 0) fsync(fd);
+    return fd;
+}
+
+static char *NBFReadFile(const char *path, long maxBytes, BOOL tail) {
+    if (!path || !path[0]) return NULL;
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return NULL;
+
+    long size = 0;
+    if (fseek(fp, 0, SEEK_END) == 0) size = ftell(fp);
+    if (size < 0) size = 0;
+
+    long start = 0;
+    if (tail && size > maxBytes) start = size - maxBytes;
+    if (size - start > maxBytes) size = start + maxBytes;
+
+    if (fseek(fp, start, SEEK_SET) != 0) { fclose(fp); return NULL; }
+
+    long length = size - start;
+    char *buffer = (char *)malloc((size_t)length + 1);
+    if (!buffer) { fclose(fp); return NULL; }
+
+    size_t got = fread(buffer, 1, (size_t)length, fp);
+    fclose(fp);
+    buffer[got] = '\0';
+    return buffer;
+}
+
+static BOOL NBFDirectoryUsable(const char *dir) {
+    if (!dir || !dir[0]) return NO;
+    mkdir(dir, 0755);
+
+    char probe[NBF_PATH_MAX];
+    snprintf(probe, sizeof(probe), "%s/.nbf-probe", dir);
+    FILE *fp = fopen(probe, "a");
+    if (!fp) return NO;
+    fclose(fp);
+    unlink(probe);
+    return YES;
+}
+
+// Pure C on purpose: this runs from the constructor, possibly before
+// Foundation's own initialisers, and a crash logger must not depend on that.
+// Documents first (survives, visible in Files), tmp second.
+static void NBFSetupPaths(void) {
+    char documents[NBF_PATH_MAX];
+    documents[0] = '\0';
+
+    const char *home = getenv("HOME");
+    if (home && home[0]) {
+        snprintf(documents, sizeof(documents), "%s/Documents/NullsBotFill", home);
+    }
+
+    const char *tempdir = getenv("TMPDIR");
+    char candidate[NBF_PATH_MAX];
+    const char *chosen = NULL;
+
+    if (documents[0] && NBFDirectoryUsable(documents)) {
+        chosen = documents;
+    } else if (tempdir && tempdir[0]) {
+        snprintf(candidate, sizeof(candidate), "%s/NullsBotFill", tempdir);
+        if (NBFDirectoryUsable(candidate)) chosen = candidate;
+    }
+    if (!chosen && NBFDirectoryUsable("/tmp/NullsBotFill")) {
+        chosen = "/tmp/NullsBotFill";
+    }
+    if (!chosen) return;
+
+    snprintf(gLogPath, sizeof(gLogPath), "%s/NullsBotFill.log", chosen);
+    snprintf(gCrashReportPath, sizeof(gCrashReportPath),
+             "%s/NullsBotFill-crash.txt", chosen);
+    snprintf(gMarkerPath, sizeof(gMarkerPath), "%s/NullsBotFill.session", chosen);
+    snprintf(gCandidatePath, sizeof(gCandidatePath),
+             "%s/NullsBotFill-candidates.txt", chosen);
+
+    gLogFile = fopen(gLogPath, "a");
+    if (gLogFile) NBFFlushFile(gLogFile);
+
+    gCrashFile = fopen(gCrashReportPath, "a");
+    if (gCrashFile) gCrashFD = fileno(gCrashFile);
+}
+
+// The shown report is deleted so it does not pop up again. Reopen the file so a
+// crash later in this same launch is still recorded.
+static void NBFReopenCrashFile(void) {
+    if (gCrashFile) fclose(gCrashFile);
+    gCrashFile = NULL;
+    gCrashFD = -1;
+    if (!gCrashReportPath[0]) return;
+    gCrashFile = fopen(gCrashReportPath, "a");
+    if (gCrashFile) gCrashFD = fileno(gCrashFile);
+}
+
+
+static const char *NBFSignalName(int sig) {
+    switch (sig) {
+        case SIGSEGV: return "SIGSEGV (bad memory access)";
+        case SIGABRT: return "SIGABRT (abort / uncaught exception)";
+        case SIGBUS:  return "SIGBUS (bad address)";
+        case SIGILL:  return "SIGILL (illegal instruction)";
+        case SIGFPE:  return "SIGFPE (arithmetic)";
+        case SIGTRAP: return "SIGTRAP (trap)";
+        case SIGTERM: return "SIGTERM";
+        default:      return "unknown signal";
+    }
+}
+
+// Async-signal-safe: only write(2), fsync(2), backtrace and raise.
+static void NBFCrashHandler(int sig) {
+    if (gInCrashHandler) {
+        signal(sig, SIG_DFL);
+        raise(sig);
+        return;
+    }
+    gInCrashHandler = 1;
+
+    int fd = gCrashFD >= 0 ? gCrashFD : 2;
+    char header[512];
+    int n = snprintf(header, sizeof(header),
+                     "\n===== NullsBotFill crash =====\n"
+                     "signal : %d %s\n"
+                     "stage  : %d (0=constructor 1=entry 2=hooks installed)\n"
+                     "pid    : %d\n"
+                     "epoch  : %ld\n"
+                     "note   : the last line of NullsBotFill.log is the last\n"
+                     "         thing that ran before this signal.\n"
+                     "backtrace:\n",
+                     sig, NBFSignalName(sig), (int)gBootStage,
+                     (int)getpid(), (long)time(NULL));
+    if (n > 0) NBFWriteAll(fd, header);
+
+    void *frames[128];
+    int count = backtrace(frames, (int)(sizeof(frames) / sizeof(frames[0])));
+    if (count > 0) backtrace_symbols_fd(frames, count, fd);
+    fsync(fd);
+
+    // Let the system's own crash reporter run as well.
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+static void NBFExceptionHandler(NSException *exception) {
+    if (gInCrashHandler) return;
+    gInCrashHandler = 1;
+
+    int fd = gCrashFD >= 0 ? gCrashFD : 2;
+    const char *name = [[exception name] UTF8String];
+    const char *reason = [[exception reason] UTF8String];
+    char header[512];
+    snprintf(header, sizeof(header),
+             "\n===== NullsBotFill uncaught exception =====\n"
+             "name   : %s\n"
+             "reason : %s\n"
+             "stage  : %d\n"
+             "pid    : %d\n"
+             "epoch  : %ld\n"
+             "backtrace:\n",
+             name ? name : "?",
+             reason ? reason : "?",
+             (int)gBootStage, (int)getpid(), (long)time(NULL));
+    NBFWriteAll(fd, header);
+
+    void *frames[128];
+    int count = backtrace(frames, (int)(sizeof(frames) / sizeof(frames[0])));
+    if (count > 0) backtrace_symbols_fd(frames, count, fd);
+    fsync(fd);
+}
+
+static const int kCrashSignals[] = {
+    SIGSEGV, SIGABRT, SIGBUS, SIGILL, SIGFPE, SIGTRAP
+};
+
+// Pure C, safe from the constructor.
+static void NBFInstallSignalHandlers(void) {
+    for (size_t i = 0; i < sizeof(kCrashSignals) / sizeof(kCrashSignals[0]); i++) {
+        signal(kCrashSignals[i], NBFCrashHandler);
+    }
+}
+
+// Foundation is guaranteed live by the time the entry timer fires.
+static void NBFInstallExceptionHandler(void) {
+    NSSetUncaughtExceptionHandler(NBFExceptionHandler);
+}
+
+static void NBFWriteMarker(const char *stage) {
+    if (!gMarkerPath[0]) return;
+    FILE *fp = fopen(gMarkerPath, "w");
+    if (!fp) return;
+    char line[256];
+    snprintf(line, sizeof(line), "stage=%s pid=%d stage_id=%d\n",
+             stage, (int)getpid(), (int)gBootStage);
+    fputs(line, fp);
+    NBFFlushFile(fp);
+    fclose(fp);
 }
 
 static void NBFLog(NSString *fmt, ...) {
@@ -48,14 +298,30 @@ static void NBFLog(NSString *fmt, ...) {
     va_end(args);
 
     NSLog(@"[NBF] %@", message);
+    if (!gLogFile) return;
 
-    NSString *path = NBFLogPath();
-    if (!path) return;
-    FILE *fp = fopen([path UTF8String], "a");
-    if (!fp) return;
-    fputs([[message stringByAppendingString:@"\n"] UTF8String], fp);
-    fclose(fp);
+    const char *text = [message UTF8String];
+    if (!text) text = "(unprintable message)";
+
+    char stamp[40];
+    time_t now = time(NULL);
+    char readable[40];
+    char *asctime = ctime_r(&now, readable);
+    if (asctime) {
+        snprintf(stamp, sizeof(stamp), "%s", asctime);
+        for (char *p = stamp; *p; p++) {
+            if (*p == '\n') { *p = '\0'; break; }
+        }
+    } else {
+        snprintf(stamp, sizeof(stamp), "%ld", (long)now);
+    }
+
+    char line[4096];
+    snprintf(line, sizeof(line), "[%s] %s\n", stamp, text);
+    NBFWriteAll(fileno(gLogFile), line);
+    NBFFlushFile(gLogFile);
 }
+
 
 // ---------------------------------------------------------------------------
 // KVC PROBING
@@ -88,6 +354,97 @@ static BOOL NBFHasKey(id object, NSString *key) {
         return NO;
     }
 }
+// Called before the first log line of this run, so the previous marker and the
+// previous log tail are still intact.
+static void NBFCheckPreviousRun(void) {
+    char *report = NBFReadFile(gCrashReportPath, 256 * 1024, NO);
+    if (report && report[0]) {
+        gPreviousRunKind = 1;
+        if (strlen(report) > 1800) report[1800] = '\0';
+        gPreviousRunText = report;
+        return;
+    }
+    free(report);
+
+    char *marker = NBFReadFile(gMarkerPath, 256, NO);
+    if (!marker) return;
+    BOOL finished = (strncmp(marker, "stage=ready", 11) == 0);
+    free(marker);
+    if (finished) return;
+
+    gPreviousRunKind = 2;
+    char *tail = NBFReadFile(gLogPath, 8000, YES);
+    if (tail) {
+        size_t len = strlen(tail);
+        if (len > 1800) {
+            // Keep the end: that is where the process died.
+            memmove(tail, tail + (len - 1800), 1801);
+        }
+    }
+    gPreviousRunText = tail;
+}
+
+// Surfaces the previous crash. Retries because the root view controller does
+// not exist yet on a cold launch.
+static void NBFPresentCrashAlert(int attempt) {
+    if (!gPreviousRunText || !gPreviousRunText[0]) return;
+
+    Class alertClass = NSClassFromString(@"UIAlertController");
+    Class actionClass = NSClassFromString(@"UIAlertAction");
+    Class pasteboardClass = NSClassFromString(@"UIPasteboard");
+    UIApplication *app = [UIApplication sharedApplication];
+    id root = nil;
+    for (id window in [app windows]) {
+        root = [window rootViewController];
+        if (root) break;
+    }
+
+    if (!alertClass || !actionClass || !root) {
+        if (attempt < 12) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                         (int64_t)(1.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                NBFPresentCrashAlert(attempt + 1);
+            });
+        }
+        return;
+    }
+
+    NSString *body = [NSString stringWithUTF8String:gPreviousRunText];
+    if (!body) return;
+
+    NSString *title = (gPreviousRunKind == 1)
+        ? @"NullsBotFill: last launch crashed"
+        : @"NullsBotFill: last launch ended early";
+    NSString *message = [NSString stringWithFormat:
+        @"Copied to the clipboard. Paste it back for a fix.\n\n%@", body];
+
+    @try {
+        if (pasteboardClass) {
+            id pasteboard = [pasteboardClass generalPasteboard];
+            if (pasteboard) [pasteboard setString:message];
+        }
+
+        id alert = [alertClass alertControllerWithTitle:title
+                                               message:message
+                                        preferredStyle:1];
+        if (!alert) return;
+        [alert addAction:[actionClass actionWithTitle:@"OK"
+                                                style:0
+                                              handler:nil]];
+        [root presentViewController:alert animated:YES completion:nil];
+
+        // One report, one alert. The clipboard copy is the durable one.
+        if (gPreviousRunKind == 1) {
+            unlink(gCrashReportPath);
+            NBFReopenCrashFile();
+        }
+    } @catch (id exception) {
+        NBFLog(@"could not present crash alert: %@", exception);
+    }
+}
+
+
 
 static BOOL NBFSetFirst(id object, NSArray *keys, id value) {
     for (NSString *key in keys) {
@@ -858,8 +1215,13 @@ static NSString *NBFCandidateDumpPath(void) {
     static NSString *path = nil;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        NSString *tmp = NSTemporaryDirectory();
-        if (tmp) path = [tmp stringByAppendingString:@"NullsBotFill-candidates.txt"];
+        if (gCandidatePath[0]) {
+            path = [NSString stringWithUTF8String:gCandidatePath];
+        }
+        if (!path) {
+            NSString *tmp = NSTemporaryDirectory();
+            if (tmp) path = [tmp stringByAppendingString:@"NullsBotFill-candidates.txt"];
+        }
     });
     return path;
 }
@@ -921,6 +1283,36 @@ static void NBFDumpCandidates(void) {
 // INSTALL
 // ---------------------------------------------------------------------------
 
+// v<off>@:<off>[@<off>] — void return, self, _cmd and at most one object
+// argument. The hooks below all take exactly one object, so anything else is
+// skipped instead of being called with a missing argument.
+static BOOL NBFEncodingTakesOneObject(const char *types) {
+    if (!types || types[0] != 'v') return NO;
+    const char *p = types + 1;
+    while (*p >= '0' && *p <= '9') p++;
+    if (*p++ != '@') return NO;
+    while (*p >= '0' && *p <= '9') p++;
+    if (*p++ != ':') return NO;
+    while (*p >= '0' && *p <= '9') p++;
+    if (*p == '\0') return YES;
+    if (*p++ != '@') return NO;
+    while (*p >= '0' && *p <= '9') p++;
+    return *p == '\0';
+}
+
+static BOOL NBFInstallOneObjectHook(Class cls, SEL sel,
+                                    Class hookClass, SEL hookSel) {
+    Method method = class_getInstanceMethod(cls, sel);
+    if (!method) return NO;
+    if (!NBFEncodingTakesOneObject(method_getTypeEncoding(method))) {
+        NBFLog(@"skip -[%s %s]: encoding %s is not a one-object hook",
+               class_getName(cls), sel_getName(sel),
+               method_getTypeEncoding(method));
+        return NO;
+    }
+    return NBFInstallMethod(cls, sel, hookClass, hookSel);
+}
+
 // Visits classes that define (not inherit) one of the given selectors.
 static void NBFScanClasses(NSArray *selectorNames,
                            void (^visit)(Class cls, SEL sel)) {
@@ -980,9 +1372,9 @@ static void NBFInstallAll(void) {
         Class cls = NSClassFromString(className);
         if (!cls) continue;
         for (NSString *selName in cfg.setupSelectors) {
-            NBFInstallMethod(cls, NSSelectorFromString(selName),
-                             [NBFSetupHook class],
-                             @selector(nbf_applyMatchConfig:));
+            NBFInstallOneObjectHook(cls, NSSelectorFromString(selName),
+                                    [NBFSetupHook class],
+                                    @selector(nbf_applyMatchConfig:));
         }
     }
 
@@ -1008,14 +1400,14 @@ static void NBFInstallAll(void) {
         Class cls = NSClassFromString(className);
         if (!cls) continue;
         for (NSString *selName in cfg.pickSelectorNames) {
-            NBFInstallMethod(cls, NSSelectorFromString(selName),
-                             [NBFRankedHook class],
-                             @selector(nbf_pickForPlayer:));
+            NBFInstallOneObjectHook(cls, NSSelectorFromString(selName),
+                                    [NBFRankedHook class],
+                                    @selector(nbf_pickForPlayer:));
         }
         for (NSString *selName in cfg.banSelectorNames) {
-            NBFInstallMethod(cls, NSSelectorFromString(selName),
-                             [NBFRankedHook class],
-                             @selector(nbf_banForPlayer:));
+            NBFInstallOneObjectHook(cls, NSSelectorFromString(selName),
+                                    [NBFRankedHook class],
+                                    @selector(nbf_banForPlayer:));
         }
     }
 
@@ -1024,9 +1416,9 @@ static void NBFInstallAll(void) {
         Class cls = NSClassFromString(className);
         if (!cls) continue;
         for (NSString *selName in cfg.joinSelectorNames) {
-            NBFInstallMethod(cls, NSSelectorFromString(selName),
-                             [NBFJoinHook class],
-                             @selector(nbf_buildJoinPacket:));
+            NBFInstallOneObjectHook(cls, NSSelectorFromString(selName),
+                                    [NBFJoinHook class],
+                                    @selector(nbf_buildJoinPacket:));
         }
     }
 
@@ -1039,10 +1431,36 @@ static void NBFInstallAll(void) {
 
 __attribute__((constructor))
 static void NBFInit(void) {
+    // Logging and crash detection come first: if anything below or in the app
+    // faults, the reason is already on disk before the app can die.
+    NBFSetupPaths();
+    NBFCheckPreviousRun();
+    NBFInstallSignalHandlers();
+    NBFWriteMarker("starting");
+
+    NBFLog(@"=== NullsBotFill launch pid=%d home=%s ===",
+           (int)getpid(), getenv("HOME") ? getenv("HOME") : "?");
+    if (gLogPath[0]) NBFLog(@"log file: %s", gLogPath);
+
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.75 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
+        gBootStage = 1;
+        NBFWriteMarker("booting");
+        NBFInstallExceptionHandler();
+
+        NSString *ios = nil;
+        @try {
+            ios = [[UIDevice currentDevice] systemVersion];
+        } @catch (...) {
+            ios = nil;
+        }
+        NBFLog(@"entry timer fired (ios %@), scanning for game classes",
+               ios ? ios : @"?");
+
+        // Surface a crash from the previous launch before doing more work.
+        NBFPresentCrashAlert(0);
+
         NBFConfig *cfg = [NBFConfig shared];
-        NBFLog(@"NullsBotFill loaded, scanning for game classes");
 
         @try {
             if (cfg.dumpCandidates) {
@@ -1051,19 +1469,23 @@ static void NBFInit(void) {
 
             if (cfg.dryRun) {
                 NBFLog(@"DryRun set — discovery only, no hooks installed");
-                return;
-            }
+            } else {
+                NBFInstallAll();
 
-            NBFInstallAll();
-
-            if (gHookCount == 0) {
-                NBFLog(@"no hooks installed — this build exposes no matching ObjC "
-                       @"surface; read the candidate dump and set the class names "
-                       @"in NullsBotFill.plist");
+                if (gHookCount == 0) {
+                    NBFLog(@"no hooks installed — this build exposes no matching ObjC "
+                           @"surface; read the candidate dump and set the class names "
+                           @"in NullsBotFill.plist");
+                }
             }
         } @catch (id exception) {
             NBFLog(@"install aborted by exception: %@", exception);
         }
+
+        gBootStage = 2;
+        NBFWriteMarker("ready");
+        NBFLog(@"startup complete — %d hooks live, log at %s",
+               gHookCount, gLogPath[0] ? gLogPath : "(unavailable)");
     });
 }
 

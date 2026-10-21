@@ -48,8 +48,9 @@
 	<key>TickSuppressOriginal</key>
 	<true/>
 
-	<!-- Writes <tmp>/NullsBotFill-candidates.txt at load: every game-shaped
-	     class and its relevant selectors. Turn off once the names are known. -->
+	<!-- Writes <container>/Documents/NullsBotFill/NullsBotFill-candidates.txt
+	     at load: every game-shaped class and its relevant selectors. Turn off
+	     once the names are known. -->
 	<key>DumpCandidates</key>
 	<true/>
 
